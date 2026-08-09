@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -371,14 +372,18 @@ void PhotoGalleryRenderer::RenderMemoryCardMode(uint8_t* fb, int width, int heig
 
     const auto& theme = ThemeManager::Get();
     const PaintStyle bg_style = theme.Style(ThemeToken::BackgroundPrimary);
-    const PaintStyle card_style = theme.Component(ComponentRole::CardDefault);
+    PaintStyle white_card_style;
+    white_card_style.fg = BLACK;
+    white_card_style.bg = WHITE;
+    white_card_style.border = BLACK;
+    white_card_style.border_width = 1;
     const PaintStyle badge_style = theme.Style(ThemeToken::Badge);
     const Color text = theme.ColorFor(ThemeToken::TextPrimary);
     const Color secondary = theme.ColorFor(ThemeToken::TextSecondary);
 
     DrawStyledRect(fb, width, {0, content_top, width, body_h}, bg_style);
     DrawStyledRoundRect(fb, width, height, {info_x, card_y, left_w, card_h},
-                        Style::kBorderRadiusMD, card_style);
+                        Style::kBorderRadiusMD, white_card_style);
 
     if (photo_ids_.empty()) {
         const char* title = "暂无回忆";
@@ -408,49 +413,71 @@ void PhotoGalleryRenderer::RenderMemoryCardMode(uint8_t* fb, int width, int heig
 
     const PhotoEntry& entry = photo_ids_[selected_index_];
 
-    const int text_x = info_x + 12;
-    const int text_w = left_w - 24;
-    int y = card_y + 20;
-    const char* chip_text = "往年今日";
-    const int chip_text_w = MeasureTextWidth(chip_text, font_);
-    Rect chip{text_x, y, std::min(text_w, chip_text_w + 24), 22};
-    DrawStyledRoundRect(fb, width, height, chip, Style::kBorderRadiusSM, badge_style);
-    DrawStyledText(fb, width, chip.x + (chip.w - chip_text_w) / 2,
-                   InkCenteredTextTopYInBox(font_, "往年今日", chip.y, chip.h, 0),
-                   chip_text, font_, badge_style, height);
-    y += 32;
+    // -----------------------------------------------------------
+    // User Design Layout: Calendar card style with date & week
+    // -----------------------------------------------------------
+    time_t now_time = time(nullptr);
+    struct tm tm_info;
+    localtime_r(&now_time, &tm_info);
 
-    auto title_lines = WrapText(entry.title[0] ? entry.title : "那年今日", title_font_, text_w, 2);
-    constexpr int kTitleLineBoxH = 24;
-    for (const auto& line : title_lines) {
-        DrawText(fb, width, text_x, InkCenteredTextTopYInBox(title_font_, line.c_str(), y, kTitleLineBoxH, 0),
-                 line.c_str(), title_font_, text);
-        y += kTitleLineBoxH + 2;
+    char mon_buf[16];
+    snprintf(mon_buf, sizeof(mon_buf), "%d月", tm_info.tm_mon + 1);
+
+    char day_buf[16];
+    snprintf(day_buf, sizeof(day_buf), "%d", tm_info.tm_mday);
+
+    static const char* kWeekDays[] = {"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"};
+    const char* week_str = kWeekDays[tm_info.tm_wday % 7];
+
+    const int center_x = info_x + left_w / 2;
+
+    // 1. Top Section: "8月" flanked by yellow dots & lines on the exact same center axis
+    const int mon_line_y = card_y + 28;
+    int mon_first_ofs = 0;
+    const int mon_ink_w = MeasureTextScaledInkWidth(mon_buf, title_font_, 1, &mon_first_ofs);
+    const int mon_x = center_x - mon_ink_w / 2 - mon_first_ofs;
+    const int mon_top_y = InkCenteredTextTopY(title_font_, mon_buf, mon_line_y, 0);
+    DrawText(fb, width, mon_x, mon_top_y, mon_buf, title_font_, BLACK);
+
+    const int mon_dot_left_x = (center_x - mon_ink_w / 2) - 12;
+    const int mon_dot_right_x = (center_x + mon_ink_w / 2) + 12;
+    DrawCircle(fb, width, {mon_dot_left_x, mon_line_y}, 2, YELLOW);
+    DrawCircle(fb, width, {mon_dot_right_x, mon_line_y}, 2, YELLOW);
+
+    const int line_left_start = info_x + 10;
+    const int line_right_end = info_x + left_w - 10;
+    if (mon_dot_left_x - 5 > line_left_start) {
+        DrawRect(fb, width, {line_left_start, mon_line_y, mon_dot_left_x - 5 - line_left_start, 1}, YELLOW);
     }
-    y += 4;
-
-    auto body_lines = WrapText(entry.body[0] ? entry.body : "暂无文案", font_, text_w, 5);
-    constexpr int kBodyLineBoxH = 22;
-    for (const auto& line : body_lines) {
-        DrawText(fb, width, text_x, InkCenteredTextTopYInBox(font_, line.c_str(), y, kBodyLineBoxH, 0),
-                 line.c_str(), font_, text);
-        y += kBodyLineBoxH + 1;
+    if (line_right_end > mon_dot_right_x + 5) {
+        DrawRect(fb, width, {mon_dot_right_x + 5, mon_line_y, line_right_end - (mon_dot_right_x + 5), 1}, YELLOW);
     }
 
-    const int meta_block_h = 44;
-    const int meta_y = card_y + card_h - meta_block_h - 12;
-    DrawStyledRoundRect(fb, width, height, {text_x - 4, meta_y, text_w + 8, meta_block_h},
-                        Style::kBorderRadiusSM, theme.Style(ThemeToken::BackgroundSecondary));
-    const std::string date_label = entry.date[0] ? entry.date : "日期未知";
-    const std::string location_label = entry.location[0] ? entry.location : "地点未知";
-    const int date_center_y = meta_y + 14;
-    const int location_center_y = meta_y + 30;
-    DrawText(fb, width, text_x + 4,
-             InkCenteredTextTopY(font_, date_label.c_str(), date_center_y, 0),
-             FitTextToWidth(date_label, font_, text_w - 8).c_str(), font_, secondary);
-    DrawText(fb, width, text_x + 4,
-             InkCenteredTextTopY(font_, location_label.c_str(), location_center_y, 0),
-             FitTextToWidth(location_label, font_, text_w - 8).c_str(), font_, secondary);
+    // 2. Middle Section: Giant RED Day Number "9" (120号字 = 24px × 5倍矢量放缩)
+    constexpr int kDayScale = 5;
+    int day_first_ofs = 0;
+    const int day_ink_w = MeasureTextScaledInkWidth(day_buf, title_font_, kDayScale, &day_first_ofs);
+    const int day_x = center_x - day_ink_w / 2 - day_first_ofs;
+    const int day_y = 105;
+    DrawTextScaled(fb, width, day_x, day_y, day_buf, title_font_, RED, kDayScale, height);
+    DrawTextScaled(fb, width, day_x + 1, day_y, day_buf, title_font_, RED, kDayScale, height);
+
+    // 3. Bottom Section: Yellow Divider with Center Dot & "星期日"
+    const int btm_line_y = card_y + card_h - 48;
+    DrawCircle(fb, width, {center_x, btm_line_y}, 2, YELLOW);
+    if (center_x - 6 > line_left_start) {
+        DrawRect(fb, width, {line_left_start, btm_line_y, center_x - 6 - line_left_start, 1}, YELLOW);
+    }
+    if (line_right_end > center_x + 6) {
+        DrawRect(fb, width, {center_x + 6, btm_line_y, line_right_end - (center_x + 6), 1}, YELLOW);
+    }
+
+    const int week_y = btm_line_y + 10;
+    int week_first_ofs = 0;
+    const int week_ink_w = MeasureTextScaledInkWidth(week_str, font_, 1, &week_first_ofs);
+    const int week_x = center_x - week_ink_w / 2 - week_first_ofs;
+    DrawText(fb, width, week_x, InkCenteredTextTopYInBox(font_, week_str, week_y, 22, 0),
+             week_str, font_, BLACK);
 
     const int frame_x = photo_x;
     const int frame_y = card_y;

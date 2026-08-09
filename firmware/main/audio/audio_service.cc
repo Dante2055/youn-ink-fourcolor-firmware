@@ -261,10 +261,12 @@ void AudioService::AudioOutputTask() {
 
         auto task = std::move(audio_playback_queue_.front());
         audio_playback_queue_.pop_front();
+        playback_active_.store(true, std::memory_order_release);
         audio_queue_cv_.notify_all();
         lock.unlock();
 
         if (mute_local_sound_.load(std::memory_order_acquire)) {
+            playback_active_.store(false, std::memory_order_release);
             continue;
         }
         if (!codec_->output_enabled()) {
@@ -277,6 +279,7 @@ void AudioService::AudioOutputTask() {
         /* Update the last output time */
         last_output_time_ = std::chrono::steady_clock::now();
         debug_statistics_.playback_count++;
+        playback_active_.store(false, std::memory_order_release);
 
 #if CONFIG_USE_SERVER_AEC
         /* Record the timestamp for server AEC */
@@ -785,9 +788,17 @@ bool AudioService::IsIdle() {
     const bool idle = audio_encode_queue_.empty() &&
         audio_decode_queue_.empty() &&
         audio_playback_queue_.empty() &&
+        !playback_active_.load(std::memory_order_acquire) &&
         audio_testing_queue_.empty();
     sm_set_busy(SleepBusySrc::Audio, !idle);
     return idle;
+}
+
+bool AudioService::IsPlaybackIdle() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    return audio_decode_queue_.empty() &&
+        audio_playback_queue_.empty() &&
+        !playback_active_.load(std::memory_order_acquire);
 }
 
 void AudioService::ResetDecoder() {

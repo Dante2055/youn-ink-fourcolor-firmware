@@ -3,6 +3,8 @@ set(SOURCES
     "main.cc"
     "settings.cc"
     "system_info.cc"
+    "protocols/protocol.cc"
+    "protocols/websocket_protocol.cc"
     "audio/audio_codec.cc"
     "audio/audio_service.cc"
     "audio/codecs/es8311_audio_codec.cc"
@@ -101,7 +103,6 @@ set(INCLUDE_DIRS
     "ui/renderers/rawdraw"
     "streaming"
     "protocols"
-    "components/78__esp-ml307/include"
     "boards/common"
     "rawdraw"
     "rawdraw/components"
@@ -121,6 +122,7 @@ idf_component_register(
         bt
         nvs_flash
         78__esp-opus
+        78__esp-ml307
         78__esp-wifi-connect
         78__xiaozhi-fonts
         esp_app_format

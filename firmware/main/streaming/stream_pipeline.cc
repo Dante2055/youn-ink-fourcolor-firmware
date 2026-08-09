@@ -150,16 +150,13 @@ void StreamPipeline::OnTextChunk(const std::string& chunk) {
 void StreamPipeline::OnTtsAudio(const TtsAudioChunk& chunk) {
     if (chunk.pcm_data.empty()) return;
 
-    ESP_LOGD(kTag, "OnTtsAudio: %zu samples, rate=%d",
-             chunk.pcm_data.size(), chunk.sample_rate);
-
     // TODO: Route audio to AudioService for playback
-    // Current implementation uses placeholder in TtsStreamer
-    //
     // Full integration would:
     // 1. Convert PCM to AudioStreamPacket format
     // 2. Push to AudioService::PushPacketToDecodeQueue()
     // 3. AudioService plays sequentially
+    ESP_LOGW(kTag, "OnTtsAudio: %zu samples discarded (audio routing not implemented)",
+             chunk.pcm_data.size());
 }
 
 }  // namespace streaming

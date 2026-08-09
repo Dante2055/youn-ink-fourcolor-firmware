@@ -4,19 +4,26 @@
 #include "boards/zectrix-s3-epaper-4.2/config.h"
 #include "board.h"
 #include "common/photo_storage.h"
+#include "common/storage_manager.h"
 #include "display.h"
+#include "protocols/websocket_protocol.h"
 #include "settings.h"
 #include "ui/rawdraw_ui_manager.h"
 #include "wifi_manager.h"
 
 #include <esp_mac.h>
 #include <esp_log.h>
+#include <esp_pm.h>
 #include <esp_sleep.h>
 #include <esp_sntp.h>
 #include <esp_system.h>
 #include <esp_wifi.h>
+#include <driver/gpio.h>
 
+#include <algorithm>
 #include <ctime>
+#include <cstdlib>
+#include <utility>
 
 namespace {
 
@@ -25,10 +32,10 @@ constexpr char kSyncNamespace[] = "sync";
 constexpr char kSyncIntervalKey[] = "sync_interval";
 constexpr char kGalleryNamespace[] = "gallery";
 constexpr char kSlideshowIntervalKey[] = "slide_min";
-constexpr int kSettingsSlideshowIndex = 3;
-constexpr int kSettingsWifiIndex = 5;
-constexpr int kSettingsHttpServerIndex = 6;
-constexpr int kSettingsLanIpIndex = 7;
+constexpr int kSettingsSlideshowIndex = 8;
+constexpr int kSettingsWifiIndex = 10;
+constexpr int kSettingsHttpServerIndex = 11;
+constexpr int kSettingsLanIpIndex = 12;
 
 std::string FormatMinutesLabel(int minutes) {
     if (minutes <= 0) return "关闭";
@@ -96,7 +103,7 @@ void StartSntpClockSyncOnce() {
         char time_buf[32] = {};
         strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &local_tm);
         ESP_LOGI(kTag, "SNTP time synchronized: %s", time_buf);
-        Application::GetInstance().UpdateStatusBarForUi();
+        Application::GetInstance().OnClockSynchronized();
     });
     esp_sntp_init();
     s_started = true;
@@ -105,6 +112,34 @@ void StartSntpClockSyncOnce() {
 
 bool IsLocalHttpServiceRunning(const ui::RawDrawUiManager* manager) {
     return manager != nullptr && manager->IsHttpServerRunning();
+}
+
+std::string JsonString(const cJSON* object, const char* key) {
+    const cJSON* value = cJSON_GetObjectItem(object, key);
+    if (cJSON_IsString(value)) return value->valuestring;
+    if (!cJSON_IsNumber(value)) return "";
+    char buffer[24];
+    snprintf(buffer, sizeof(buffer), "%g", value->valuedouble);
+    return buffer;
+}
+
+int32_t JsonInt(const cJSON* object, const char* key, int32_t fallback = 0) {
+    const cJSON* value = cJSON_GetObjectItem(object, key);
+    if (cJSON_IsNumber(value)) return static_cast<int32_t>(value->valuedouble);
+    if (cJSON_IsString(value)) {
+        char* end = nullptr;
+        const long parsed = strtol(value->valuestring, &end, 10);
+        if (end != value->valuestring && *end == '\0') return static_cast<int32_t>(parsed);
+    }
+    return fallback;
+}
+
+std::string JsonSignature(const cJSON* object) {
+    char* json = cJSON_PrintUnformatted(object);
+    if (!json) return "";
+    std::string signature(json);
+    cJSON_free(json);
+    return signature;
 }
 
 }  // namespace
@@ -121,6 +156,9 @@ Application::~Application() {
 
 void Application::Initialize() {
     auto& board = Board::GetInstance();
+    const bool woke_by_boot_button =
+        esp_reset_reason() == ESP_RST_DEEPSLEEP &&
+        (esp_sleep_get_wakeup_causes() & BIT(ESP_SLEEP_WAKEUP_EXT0)) != 0;
     SetDeviceState(kDeviceStateStarting);
 
     AudioCodec* codec = board.GetAudioCodec();
@@ -154,13 +192,19 @@ void Application::Initialize() {
             lcd->RequestUrgentRefresh();
         }
     });
+    rawdraw_ui_manager_->SetPageSwitchCallback([this](ui::RawDrawPageId page) {
+        const bool active = page == ui::RawDrawPageId::Chat;
+        if (conversation_active_.exchange(active, std::memory_order_acq_rel) == active) return;
+        resume_listening_.store(false, std::memory_order_release);
+        Schedule([this, active]() { active ? StartListening() : StopListening(); });
+    });
 
     if (auto* sr = rawdraw_ui_manager_->GetSettingsRenderer()) {
         Settings gallery_nvs(kGalleryNamespace, false);
-        int slideshow_interval = gallery_nvs.GetInt(kSlideshowIntervalKey, 5);
+        int slideshow_interval = gallery_nvs.GetInt(kSlideshowIntervalKey, 0);
         if (slideshow_interval != 0 && slideshow_interval != 5 &&
             slideshow_interval != 10 && slideshow_interval != 30) {
-            slideshow_interval = 5;
+            slideshow_interval = 0;
         }
         ESP_LOGI(kTag, "Startup gallery fullscreen slideshow: %s, interval=%s",
                  FormatMinutesLogLabel(slideshow_interval),
@@ -168,15 +212,49 @@ void Application::Initialize() {
         rawdraw_ui_manager_->SetGallerySlideshowIntervalMinutes(slideshow_interval);
 
         std::vector<rawdraw::SettingsItemDef> items;
-        items.push_back({"系统", "", nullptr, rawdraw::SettingsItemType::Section, false});
-        items.push_back({"重启", "执行", nullptr, rawdraw::SettingsItemType::Action, false,
-                         []() { esp_restart(); }});
+        items.push_back({"应用", "", nullptr, rawdraw::SettingsItemType::Section, false});
+        items.push_back({"日历", "打开", nullptr, rawdraw::SettingsItemType::Action, false,
+                         [this]() {
+                             if (rawdraw_ui_manager_) {
+                                 rawdraw_ui_manager_->SetCurrentPageWithoutRender(ui::RawDrawPageId::Calendar);
+                             }
+                         }});
+        items.push_back({"老黄历", "打开", nullptr, rawdraw::SettingsItemType::Action, false,
+                         [this]() {
+                             if (rawdraw_ui_manager_) {
+                                 rawdraw_ui_manager_->SetCurrentPageWithoutRender(ui::RawDrawPageId::Almanac);
+                             }
+                         }});
+        items.push_back({"电子书", "打开", nullptr, rawdraw::SettingsItemType::Action, false,
+                         [this]() {
+                             if (!rawdraw_ui_manager_) return;
+                             rawdraw_ui_manager_->GetEbookRenderer()->SetFileList(storage_manager::ListTxtFiles());
+                             rawdraw_ui_manager_->SetCurrentPageWithoutRender(ui::RawDrawPageId::Ebook);
+                         }});
+        items.push_back({"天气", "服务器下发", nullptr, rawdraw::SettingsItemType::Action, false,
+                         [this]() {
+                             if (rawdraw_ui_manager_) {
+                                 rawdraw_ui_manager_->SetCurrentPageWithoutRender(ui::RawDrawPageId::Weather);
+                             }
+                         }});
+        items.push_back({"天气详情", "打开", nullptr, rawdraw::SettingsItemType::Action, false,
+                         [this]() {
+                             if (rawdraw_ui_manager_) {
+                                 rawdraw_ui_manager_->SetCurrentPageWithoutRender(ui::RawDrawPageId::WeatherDetail);
+                             }
+                         }});
+        items.push_back({"新闻", "服务器下发", nullptr, rawdraw::SettingsItemType::Action, false,
+                         [this]() {
+                             if (rawdraw_ui_manager_) {
+                                 rawdraw_ui_manager_->SetCurrentPageWithoutRender(ui::RawDrawPageId::News);
+                             }
+                         }});
         items.push_back({"相册", "", nullptr, rawdraw::SettingsItemType::Section, false});
         items.push_back({"轮播间隔", FormatMinutesLabel(slideshow_interval), nullptr,
                          rawdraw::SettingsItemType::Action, false,
                          [this, sr]() {
                              Settings nvs(kGalleryNamespace, true);
-                             const int current = nvs.GetInt(kSlideshowIntervalKey, 5);
+                             const int current = nvs.GetInt(kSlideshowIntervalKey, 0);
                              const int next = NextSlideshowInterval(current);
                              nvs.SetInt(kSlideshowIntervalKey, next);
                              if (rawdraw_ui_manager_) {
@@ -260,6 +338,9 @@ void Application::Initialize() {
                              ESP_LOGI(kTag, "Manual sleep requested from settings");
                              EnterManualSleep();
                          }});
+        items.push_back({"系统", "", nullptr, rawdraw::SettingsItemType::Section, false});
+        items.push_back({"重启", "执行", nullptr, rawdraw::SettingsItemType::Action, false,
+                         []() { esp_restart(); }});
         items.push_back({"关于", "", nullptr, rawdraw::SettingsItemType::Section, false});
         items.push_back({"固件", PROJECT_VER, nullptr, rawdraw::SettingsItemType::Normal, false});
         sr->SetItems(items);
@@ -274,6 +355,8 @@ void Application::Initialize() {
         sr->SetDeviceInfo(mac_str, "ESP32-S3");
     }
 
+    InitializeDialogueProtocol(codec);
+
     ESP_LOGI(kTag, "Rawdraw gallery UI initialized");
     if (esp_reset_reason() == ESP_RST_DEEPSLEEP) {
         ESP_LOGI(kTag, "Wake from deep sleep: flash activity LED and refresh UI");
@@ -284,13 +367,18 @@ void Application::Initialize() {
     }
 
     // Set up WiFi status callback to update StatusBar
-    board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
+    board.SetNetworkEventCallback([this, woke_by_boot_button](NetworkEvent event, const std::string& data) {
         switch (event) {
             case NetworkEvent::Connected:
                 ESP_LOGI(kTag, "WiFi connected: %s", data.c_str());
                 wifi_connected_.store(true, std::memory_order_release);
                 StartSntpClockSyncOnce();
-                if (rawdraw_ui_manager_ && !rawdraw_ui_manager_->IsLanHttpServerRunning()) {
+                if (conversation_active_.load(std::memory_order_acquire)) {
+                    Schedule([this]() { StartListening(); });
+                }
+                if (woke_by_boot_button) {
+                    ESP_LOGI(kTag, "LAN HTTP server auto-start skipped after BOOT wake");
+                } else if (rawdraw_ui_manager_ && !rawdraw_ui_manager_->IsLanHttpServerRunning()) {
                     const std::string ip = data.empty() ? WifiManager::GetInstance().GetIpAddress() : data;
                     if (!ip.empty()) {
                         const bool started = rawdraw_ui_manager_->StartLanHttpServer(ip);
@@ -361,6 +449,36 @@ void Application::Initialize() {
     board.RequestNetwork();
 
     SetDeviceState(kDeviceStateIdle);
+
+    // ---- Light sleep configuration ----
+    // Enable automatic light sleep: when all FreeRTOS tasks are blocked,
+    // the CPU enters light sleep and wakes on GPIO interrupt or esp_timer.
+#if CONFIG_PM_ENABLE
+    esp_pm_config_t pm_config = {};
+    pm_config.max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;  // 240 MHz when active
+    pm_config.min_freq_mhz = CONFIG_XTAL_FREQ;                 // XTAL (40 MHz) when idle
+    pm_config.light_sleep_enable = true;
+    esp_err_t pm_err = esp_pm_configure(&pm_config);
+    if (pm_err == ESP_OK) {
+        ESP_LOGI(kTag, "Auto light sleep enabled (max=%dMHz, min=%dMHz)",
+                 pm_config.max_freq_mhz, pm_config.min_freq_mhz);
+    } else {
+        ESP_LOGW(kTag, "Failed to configure PM: %s", esp_err_to_name(pm_err));
+    }
+
+    // Configure button GPIOs as light sleep wakeup sources
+    const gpio_num_t wake_gpios[] = {
+        static_cast<gpio_num_t>(BOOT_BUTTON_GPIO),       // GPIO 0  - BOOT/confirm
+        static_cast<gpio_num_t>(TODO_UP_BUTTON_GPIO),    // GPIO 39 - UP
+        static_cast<gpio_num_t>(TODO_DOWN_BUTTON_GPIO),  // GPIO 18 - DOWN
+    };
+    for (auto pin : wake_gpios) {
+        gpio_wakeup_enable(pin, GPIO_INTR_LOW_LEVEL);
+    }
+    esp_sleep_enable_gpio_wakeup();
+    ESP_LOGI(kTag, "GPIO wakeup enabled for buttons: %d, %d, %d",
+             BOOT_BUTTON_GPIO, TODO_UP_BUTTON_GPIO, TODO_DOWN_BUTTON_GPIO);
+#endif  // CONFIG_PM_ENABLE
 }
 
 void Application::OnUpClick() {
@@ -382,11 +500,14 @@ void Application::OnDownClick() {
 void Application::OnUpLongPress() {
     ESP_LOGI(kTag, "UP long press");
     NoteButtonActivity();
-    if (rawdraw_ui_manager_ &&
-        rawdraw_ui_manager_->GetCurrentPage() == ui::RawDrawPageId::Settings) {
-        ESP_LOGI(kTag, "UP long press - leaving settings");
-        rawdraw_ui_manager_->SwitchPage(ui::RawDrawPageId::Gallery);
-    }
+    if (!rawdraw_ui_manager_) return;
+
+    const auto current_page = rawdraw_ui_manager_->GetCurrentPage();
+    const auto target_page =
+        (current_page == ui::RawDrawPageId::Chat || current_page == ui::RawDrawPageId::Settings)
+            ? ui::RawDrawPageId::Gallery
+            : ui::RawDrawPageId::Chat;
+    rawdraw_ui_manager_->SwitchPage(target_page);
 }
 
 void Application::OnDownLongPress() {
@@ -407,7 +528,36 @@ void Application::OnWifiConfigComboLongPress() {
 void Application::OnBootClick() {
     ESP_LOGI(kTag, "BOOT click");
     Board::GetInstance().FlashActivityLed();
+    if (rawdraw_ui_manager_ &&
+        rawdraw_ui_manager_->GetCurrentPage() == ui::RawDrawPageId::Chat &&
+        GetDeviceState() == kDeviceStateIdle) {
+        resume_listening_.store(false, std::memory_order_release);
+        Schedule([this]() { StartListening(); });
+        return;
+    }
     if (rawdraw_ui_manager_) {
+        const auto page = rawdraw_ui_manager_->GetCurrentPage();
+        if (page == ui::RawDrawPageId::Weather) {
+            rawdraw_ui_manager_->SwitchPage(ui::RawDrawPageId::WeatherDetail);
+            return;
+        }
+        if (page == ui::RawDrawPageId::WeatherDetail) {
+            rawdraw_ui_manager_->SwitchPage(ui::RawDrawPageId::Weather);
+            return;
+        }
+        if (page == ui::RawDrawPageId::Ebook) {
+            auto* ebook = rawdraw_ui_manager_->GetEbookRenderer();
+            if (ebook && !ebook->IsReaderMode()) {
+                const std::string filename = ebook->GetSelectedFile();
+                if (filename.empty()) return;
+                const std::string content = storage_manager::ReadTxtFile(filename);
+                if (!content.empty()) {
+                    ebook->OpenFile(filename, content);
+                    rawdraw_ui_manager_->RequestActivePageRefresh();
+                }
+                return;
+            }
+        }
         rawdraw_ui_manager_->HandleInput(rawdraw::ButtonEvent{rawdraw::ButtonEvent::kBootClick});
     }
 }
@@ -423,16 +573,312 @@ void Application::OnBootLongPress() {
         WifiManager::GetInstance().StartStation();
         return;
     }
+
     if (rawdraw_ui_manager_) {
         rawdraw_ui_manager_->HandleInput(rawdraw::ButtonEvent{rawdraw::ButtonEvent::kBootLongPress});
     }
 }
 
+void Application::OnBootRelease() {
+}
+
+void Application::OnClockSynchronized() {
+    UpdateStatusBarForUi();
+    if (conversation_active_.load(std::memory_order_acquire)) {
+        Schedule([this]() { StartListening(); });
+    }
+}
+
+void Application::InitializeDialogueProtocol(AudioCodec* codec) {
+    protocol_ = std::make_unique<WebsocketProtocol>();
+
+    AudioServiceCallbacks audio_callbacks;
+    audio_callbacks.on_send_queue_available = [this]() {
+        if (!protocol_ || !protocol_->IsAudioChannelOpened()) {
+            while (audio_service_.PopPacketFromSendQueue()) {
+            }
+            return;
+        }
+        while (auto packet = audio_service_.PopPacketFromSendQueue()) {
+            if (!protocol_->SendAudio(std::move(packet))) {
+                break;
+            }
+        }
+    };
+    audio_service_.SetCallbacks(audio_callbacks);
+
+    protocol_->OnNetworkError([this](const std::string& message) {
+        Schedule([this, message]() {
+            protocol_connected_.store(false, std::memory_order_release);
+            SetDeviceState(kDeviceStateIdle);
+            ESP_LOGW(kTag, "Dialogue network error: %s", message.c_str());
+            UpdateStatusBarForUi();
+        });
+    });
+    protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
+        audio_service_.PushPacketToDecodeQueue(std::move(packet));
+    });
+    protocol_->OnIncomingJson([this](const cJSON* root) {
+        HandleProtocolJson(root);
+    });
+    protocol_->OnAudioChannelOpened([this, codec]() {
+        Schedule([this, codec]() {
+            protocol_connected_.store(true, std::memory_order_release);
+            if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
+                ESP_LOGW(kTag, "Server audio is %d Hz; codec output is %d Hz",
+                         protocol_->server_sample_rate(), codec->output_sample_rate());
+            }
+            UpdateStatusBarForUi();
+        });
+    });
+    protocol_->OnAudioChannelClosed([this]() {
+        Schedule([this]() {
+            protocol_connected_.store(false, std::memory_order_release);
+            protocol_connecting_.store(false, std::memory_order_release);
+            resume_listening_.store(false, std::memory_order_release);
+            audio_service_.EnableVoiceProcessing(false);
+            SetDeviceState(kDeviceStateIdle);
+            UpdateStatusBarForUi();
+        });
+    });
+
+    protocol_->Start();
+}
+
+void Application::StartListening() {
+    if (!protocol_ || !conversation_active_.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (protocol_->IsAudioChannelOpened()) {
+        BeginListening();
+        return;
+    }
+    PrepareDialogueConnection();
+}
+
+void Application::PrepareDialogueConnection() {
+    time_t now = time(nullptr);
+    struct tm local_tm = {};
+    localtime_r(&now, &local_tm);
+    if (!protocol_) {
+        ESP_LOGD(kTag, "PrepareDialogue: no protocol");
+        return;
+    }
+    if (protocol_->IsAudioChannelOpened()) {
+        ESP_LOGD(kTag, "PrepareDialogue: audio channel already open");
+        return;
+    }
+    if (local_tm.tm_year + 1900 < 2020) {
+        ESP_LOGD(kTag, "PrepareDialogue: system time not synced (year=%d)", local_tm.tm_year + 1900);
+        return;
+    }
+    if (!conversation_active_.load(std::memory_order_acquire)) {
+        ESP_LOGD(kTag, "PrepareDialogue: conversation not active");
+        return;
+    }
+    if (!wifi_connected_.load(std::memory_order_acquire) &&
+        !WifiManager::GetInstance().IsConnected()) {
+        ESP_LOGD(kTag, "PrepareDialogue: WiFi not connected");
+        return;
+    }
+    if (protocol_connecting_.exchange(true, std::memory_order_acq_rel)) {
+        ESP_LOGD(kTag, "PrepareDialogue: already connecting");
+        return;
+    }
+
+    SetDeviceState(kDeviceStateConnecting);
+    const BaseType_t created = xTaskCreate(
+        [](void* arg) {
+            auto* app = static_cast<Application*>(arg);
+            app->ConnectAndStartListening();
+            vTaskDelete(nullptr);
+        },
+        "chat_connect", 6144, this, 3, nullptr);
+    if (created != pdPASS) {
+        protocol_connecting_.store(false, std::memory_order_release);
+        SetDeviceState(kDeviceStateIdle);
+        ESP_LOGE(kTag, "Unable to start dialogue connection task");
+    }
+}
+
+void Application::ConnectAndStartListening() {
+    const bool opened = protocol_ && protocol_->OpenAudioChannel();
+    Schedule([this, opened]() {
+        protocol_connecting_.store(false, std::memory_order_release);
+        if (!opened) {
+            SetDeviceState(kDeviceStateIdle);
+            return;
+        }
+        if (!conversation_active_.load(std::memory_order_acquire)) {
+            SetDeviceState(kDeviceStateIdle);
+            return;
+        }
+        BeginListening();
+    });
+}
+
+void Application::BeginListening() {
+    if (!protocol_ || !protocol_->IsAudioChannelOpened() ||
+        !conversation_active_.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (GetDeviceState() == kDeviceStateSpeaking) {
+        protocol_->SendAbortSpeaking(kAbortReasonNone);
+        audio_service_.ResetDecoder();
+    }
+
+    audio_service_.MarkPttStart(esp_timer_get_time() / 1000);
+    audio_service_.EnableVoiceProcessing(true);
+    protocol_->SendStartListening(kListeningModeAutoStop);
+    SetDeviceState(kDeviceStateListening);
+}
+
+void Application::StopListening() {
+    resume_listening_.store(false, std::memory_order_release);
+    audio_service_.EnableVoiceProcessing(false);
+    if (protocol_ && protocol_->IsAudioChannelOpened()) {
+        if (GetDeviceState() == kDeviceStateSpeaking) {
+            protocol_->SendAbortSpeaking(kAbortReasonNone);
+            audio_service_.ResetDecoder();
+        } else if (GetDeviceState() == kDeviceStateListening) {
+            protocol_->SendStopListening();
+        }
+    }
+    SetDeviceState(kDeviceStateIdle);
+}
+
+void Application::HandleProtocolJson(const cJSON* root) {
+    const cJSON* type = cJSON_GetObjectItem(root, "type");
+    if (!cJSON_IsString(type)) {
+        return;
+    }
+
+    const cJSON* payload = root;
+    const char* message_type = type->valuestring;
+    if (strcmp(message_type, "custom") == 0) {
+        payload = cJSON_GetObjectItem(root, "payload");
+        if (!cJSON_IsObject(payload)) return;
+        const cJSON* payload_type = cJSON_GetObjectItem(payload, "type");
+        if (!cJSON_IsString(payload_type)) return;
+        message_type = payload_type->valuestring;
+    }
+    const cJSON* data_object = cJSON_GetObjectItem(payload, "data");
+    if (cJSON_IsObject(data_object)) payload = data_object;
+
+    if (strcmp(message_type, "weather") == 0) {
+        const std::string signature = JsonSignature(payload);
+        WeatherData data;
+        data.city = JsonString(payload, "city");
+        data.temp = JsonString(payload, "temp");
+        data.feels_like = JsonString(payload, "feels_like");
+        data.weather_icon = JsonString(payload, "weather_icon");
+        data.weather_text = JsonString(payload, "weather_text");
+        data.wind_dir = JsonString(payload, "wind_dir");
+        data.wind_scale = JsonString(payload, "wind_scale");
+        data.humidity = JsonString(payload, "humidity");
+        data.update_time = JsonString(payload, "update_time");
+        data.air_quality = JsonString(payload, "air_quality");
+        data.air_aqi = JsonInt(payload, "air_aqi", -1);
+        data.temp_int = JsonInt(payload, "temp");
+
+        const cJSON* forecast = cJSON_GetObjectItem(payload, "forecast");
+        const int forecast_count = cJSON_IsArray(forecast) ? std::min(cJSON_GetArraySize(forecast), 7) : 0;
+        data.forecast.reserve(forecast_count);
+        for (int i = 0; i < forecast_count; ++i) {
+            const cJSON* item = cJSON_GetArrayItem(forecast, i);
+            if (!cJSON_IsObject(item)) continue;
+            data.forecast.push_back({JsonString(item, "label"), JsonString(item, "weather_text"),
+                                     JsonString(item, "icon_code"), JsonInt(item, "temp_min"),
+                                     JsonInt(item, "temp_max")});
+        }
+
+        std::vector<rawdraw::WeatherHourPoint> hourly;
+        const cJSON* hourly_json = cJSON_GetObjectItem(payload, "hourly");
+        const int hourly_count = cJSON_IsArray(hourly_json) ? std::min(cJSON_GetArraySize(hourly_json), 12) : 0;
+        hourly.reserve(hourly_count);
+        for (int i = 0; i < hourly_count; ++i) {
+            const cJSON* item = cJSON_GetArrayItem(hourly_json, i);
+            if (!cJSON_IsObject(item)) continue;
+            hourly.push_back({JsonString(item, "label"), JsonString(item, "icon_code"),
+                              JsonString(item, "weather_text"), JsonInt(item, "temp")});
+        }
+
+        if (data.city.empty() && data.temp.empty() && data.weather_text.empty() &&
+            data.forecast.empty() && hourly.empty()) {
+            ESP_LOGW(kTag, "Ignoring empty weather payload");
+            return;
+        }
+        static std::string last_signature;
+        if (!signature.empty() && signature == last_signature) return;
+        last_signature = signature;
+        Schedule([this, data = std::move(data), hourly = std::move(hourly)]() mutable {
+            if (!rawdraw_ui_manager_) return;
+            rawdraw_ui_manager_->GetWeatherRenderer()->Update(data);
+            auto* detail = rawdraw_ui_manager_->GetWeatherDetailRenderer();
+            detail->SetHourlyForecast(hourly);
+            detail->Update(data);
+            const auto page = rawdraw_ui_manager_->GetCurrentPage();
+            if (page == ui::RawDrawPageId::Weather || page == ui::RawDrawPageId::WeatherDetail) {
+                rawdraw_ui_manager_->RequestActivePageRefresh();
+            }
+        });
+        return;
+    }
+
+    if (strcmp(message_type, "news") == 0) {
+        const std::string signature = JsonSignature(payload);
+        std::vector<rawdraw::NewsItem> items;
+        const cJSON* items_json = cJSON_GetObjectItem(payload, "items");
+        const int item_count = cJSON_IsArray(items_json) ? std::min(cJSON_GetArraySize(items_json), 20) : 0;
+        items.reserve(item_count);
+        for (int i = 0; i < item_count; ++i) {
+            const cJSON* item = cJSON_GetArrayItem(items_json, i);
+            if (!cJSON_IsObject(item)) continue;
+            rawdraw::NewsItem news{JsonString(item, "title"), JsonString(item, "summary"),
+                                   JsonString(item, "source"), JsonString(item, "time_label")};
+            if (!news.title.empty()) items.push_back(std::move(news));
+        }
+        if (items.empty()) {
+            ESP_LOGW(kTag, "Ignoring empty news payload");
+            return;
+        }
+        static std::string last_signature;
+        if (!signature.empty() && signature == last_signature) return;
+        last_signature = signature;
+        Schedule([this, items = std::move(items)]() mutable {
+            if (!rawdraw_ui_manager_) return;
+            rawdraw_ui_manager_->GetNewsRenderer()->SetItems(items);
+            if (rawdraw_ui_manager_->GetCurrentPage() == ui::RawDrawPageId::News) {
+                rawdraw_ui_manager_->RequestActivePageRefresh();
+            }
+        });
+        return;
+    }
+
+    if (strcmp(type->valuestring, "tts") != 0) {
+        return;
+    }
+    const cJSON* state = cJSON_GetObjectItem(root, "state");
+    if (!cJSON_IsString(state)) {
+        return;
+    }
+
+    if (strcmp(state->valuestring, "start") == 0) {
+        Schedule([this]() {
+            audio_service_.EnableVoiceProcessing(false);
+            SetDeviceState(kDeviceStateSpeaking);
+        });
+    } else if (strcmp(state->valuestring, "stop") == 0) {
+        Schedule([this]() {
+            SetDeviceState(kDeviceStateIdle);
+            resume_listening_.store(conversation_active_.load(std::memory_order_acquire),
+                                    std::memory_order_release);
+        });
+    }
+}
+
 void Application::NoteButtonActivity() {
     Board::GetInstance().FlashActivityLed();
-    if (rawdraw_ui_manager_) {
-        rawdraw_ui_manager_->RequestActivePageRefresh();
-    }
 }
 
 void Application::EnterWifiConfigMode() {
@@ -469,7 +915,7 @@ void Application::ArmSyncSleepTimer() {
     }
 
     Settings nvs(kSyncNamespace, false);
-    const int interval_minutes = nvs.GetInt(kSyncIntervalKey, 30);
+    const int interval_minutes = nvs.GetInt(kSyncIntervalKey, 5);
     if (interval_minutes <= 0) {
         ESP_LOGI(kTag, "Sync sleep interval: 关闭");
         return;
@@ -492,6 +938,11 @@ void Application::ArmSyncSleepTimer() {
 }
 
 void Application::EnterScheduledSleep() {
+    if (conversation_active_.load(std::memory_order_acquire)) {
+        ESP_LOGI(kTag, "Scheduled sleep skipped: dialogue page is active");
+        ArmSyncSleepTimer();
+        return;
+    }
     if (IsLocalHttpServiceRunning(rawdraw_ui_manager_.get())) {
         ESP_LOGI(kTag, "Scheduled sleep skipped: local HTTP transfer service is running");
         ArmSyncSleepTimer();
@@ -531,10 +982,30 @@ void Application::EnterManualSleep() {
 
 void Application::Run() {
     while (true) {
+        std::deque<std::function<void()>> callbacks;
+        {
+            std::lock_guard<std::mutex> lock(scheduled_mutex_);
+            callbacks.swap(scheduled_callbacks_);
+        }
+        for (auto& callback : callbacks) {
+            if (callback) {
+                callback();
+            }
+        }
+        if (resume_listening_.load(std::memory_order_acquire) &&
+            audio_service_.IsPlaybackIdle() &&
+            resume_listening_.exchange(false, std::memory_order_acq_rel)) {
+            BeginListening();
+        }
         if (rawdraw_ui_manager_) {
+            rawdraw_ui_manager_->VoiceWakeupTick();
             rawdraw_ui_manager_->PumpClockRefresh();
         }
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        // Use longer delay when idle to give tickless idle / light sleep
+        // more opportunity. 20ms when there's pending work, 100ms when idle.
+        const bool has_pending_work = !callbacks.empty() ||
+            resume_listening_.load(std::memory_order_acquire);
+        vTaskDelay(pdMS_TO_TICKS(has_pending_work ? 20 : 100));
     }
 }
 
@@ -545,9 +1016,9 @@ bool Application::SetDeviceState(DeviceState state) {
 }
 
 void Application::Schedule(std::function<void()>&& callback) {
-    if (callback) {
-        callback();
-    }
+    if (!callback) return;
+    std::lock_guard<std::mutex> lock(scheduled_mutex_);
+    scheduled_callbacks_.push_back(std::move(callback));
 }
 
 void Application::PlaySound(const std::string_view& sound) {
@@ -567,7 +1038,7 @@ void Application::StopSound() {
 }
 
 bool Application::CanEnterSleepMode() const {
-    return false;
+    return true;
 }
 
 void Application::UpdateStatusBarForUi() {
@@ -583,7 +1054,8 @@ void Application::UpdateStatusBarForUi() {
         ui::RawDrawStatusBarData data = rawdraw_ui_manager_->GetStatusBarData();
         data.page_title = ui::RawDrawUiManager::GetPageTitle(rawdraw_ui_manager_->GetCurrentPage());
         data.wifi_connected = wifi_connected;
-        data.server_connected = http_server_running;
+        data.server_connected = http_server_running ||
+                                protocol_connected_.load(std::memory_order_acquire);
         data.battery_level = battery_level;
         data.battery_charging = charging;
         rawdraw_ui_manager_->UpdateStatusBar(data);

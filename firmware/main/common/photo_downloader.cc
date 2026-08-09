@@ -44,9 +44,12 @@ static uint8_t s_photo_buf[PHOTO_BUF_SIZE];
 static esp_err_t http_event_handler(esp_http_client_event_t* evt) {
     switch (evt->event_id) {
         case HTTP_EVENT_ON_DATA:
-            if (s_http_len + evt->data_len < sizeof(s_http_buf)) {
+            if (s_http_len + evt->data_len < sizeof(s_http_buf) - 1) {
                 memcpy(s_http_buf + s_http_len, evt->data, evt->data_len);
                 s_http_len += evt->data_len;
+            } else {
+                ESP_LOGW(kTag, "HTTP response buffer overflow: %d + %d >= %d",
+                         s_http_len, evt->data_len, (int)sizeof(s_http_buf) - 1);
             }
             break;
         default:

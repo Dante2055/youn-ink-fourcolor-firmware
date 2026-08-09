@@ -132,8 +132,6 @@ void GattsEventHandler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if_param,
             // Device connected
             ESP_LOGI(kTag, "CONNECT_EVT, conn_id=%d", param->connect.conn_id);
             conn_id = param->connect.conn_id;
-            // Request larger MTU for faster transfer
-            esp_ble_gatt_set_local_mtu(247);  // Request 247 bytes MTU
             break;
 
         case ESP_GATTS_DISCONNECT_EVT:
@@ -173,16 +171,17 @@ void GattsEventHandler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if_param,
         case ESP_GATTS_READ_EVT:
             // Read request
             if (param->read.handle == char_image_control_handle) {
-                // Return transfer status
-                uint8_t status[4] = {
+                // Return transfer status: [status, recv_hi, recv_lo, exp_hi, exp_lo]
+                uint8_t status[5] = {
                     ble_image_receiver::GetStatus(),
                     (uint8_t)(ble_image_receiver::GetReceivedBytes() >> 8),
                     (uint8_t)(ble_image_receiver::GetReceivedBytes() & 0xFF),
                     (uint8_t)(ble_image_receiver::GetExpectedSize() >> 8),
+                    (uint8_t)(ble_image_receiver::GetExpectedSize() & 0xFF),
                 };
                 esp_gatt_rsp_t rsp = {};
-                rsp.attr_value.len = 4;
-                memcpy(rsp.attr_value.value, status, 4);
+                rsp.attr_value.len = 5;
+                memcpy(rsp.attr_value.value, status, 5);
                 esp_ble_gatts_send_response(gatts_if, conn_id, param->read.trans_id,
                                            ESP_GATT_OK, &rsp);
             } else if (param->read.handle == char_device_info_handle) {
@@ -295,6 +294,9 @@ namespace ble_gatt_service {
 bool Init() {
     ESP_LOGI(kTag, "Registering GATT service");
     
+    // Set local MTU before registering app (ESP-IDF recommendation)
+    esp_ble_gatt_set_local_mtu(247);
+
     // Register GATT server callback
     esp_err_t ret = esp_ble_gatts_register_callback(GattsEventHandler);
     if (ret != ESP_OK) {

@@ -8,6 +8,13 @@ config USE_EMOTE_MESSAGE_STYLE
         instead of LVGL. This is the recommended mode for the ZecTrix
         S3 E-Paper 4.2 board as LVGL causes frequent crashes.
 
+config OTA_URL
+    string "OTA configuration URL"
+    default "https://api.tenclass.net/xiaozhi/ota/"
+    help
+        Endpoint used to discover the WebSocket URL and token when the
+        websocket NVS namespace has not been provisioned yet.
+
 config BOARD_TYPE_ZECTRIX_S3_EPAPER_4_2
     bool "zectrix-s3-epaper-4.2 FT firmware"
     default y

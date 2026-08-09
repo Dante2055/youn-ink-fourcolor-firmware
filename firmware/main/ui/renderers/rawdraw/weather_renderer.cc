@@ -141,10 +141,8 @@ WeatherRenderer::~WeatherRenderer() {}
 void WeatherRenderer::Init(int width, int height) {
     width_ = width;
     height_ = height;
-    has_data_ = false;
     needs_full_refresh_ = true;
     page_index_ = 0;
-    firmware_version_.clear();
 }
 
 void WeatherRenderer::Render(uint8_t* fb, int width, int height) {
@@ -164,7 +162,7 @@ void WeatherRenderer::Render(uint8_t* fb, int width, int height) {
 
     if (!has_data_) {
         const char* empty_text = "暂无天气数据";
-        const char* hint = "长按刷新";
+        const char* hint = "等待小智服务器下发";
         int text_w = MeasureTextWidth(empty_text, font_);
         int hint_w = MeasureTextWidth(hint, font_);
         int center_y = content_top + (height - content_top) / 2;

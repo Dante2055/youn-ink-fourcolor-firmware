@@ -672,7 +672,7 @@ esp_err_t ApTransferServer::StatusHandler(httpd_req_t* req) {
 esp_err_t ApTransferServer::SettingsHandler(httpd_req_t* req) {
     auto* self = static_cast<ApTransferServer*>(req->user_ctx);
     Settings nvs(kGalleryNamespace, req->method == HTTP_POST);
-    int interval = nvs.GetInt(kSlideshowIntervalKey, 5);
+    int interval = nvs.GetInt(kSlideshowIntervalKey, 0);
     bool close_service = false;
     bool stop_wifi = false;
     bool enter_sleep = false;
@@ -687,7 +687,7 @@ esp_err_t ApTransferServer::SettingsHandler(httpd_req_t* req) {
         if (cJSON_IsNumber(item)) {
             interval = item->valueint;
             if (interval != 0 && interval != 5 && interval != 10 && interval != 30) {
-                interval = 5;
+                interval = 0;
             }
             nvs.SetInt(kSlideshowIntervalKey, interval);
             if (self && self->settings_changed_callback_) {

@@ -422,20 +422,28 @@ void WifiConfigurationAp::StartWebServer()
                 password_str = password_item->valuestring;
             }
 
-            // 获取当前对象
             auto *this_ = static_cast<WifiConfigurationAp *>(req->user_ctx);
-            if (!this_->ConnectToWifi(ssid_str, password_str)) {
-                cJSON_Delete(json);
-                httpd_resp_send(req, "{\"success\":false,\"error\":\"Failed to connect to the Access Point\"}", HTTPD_RESP_USE_STRLEN);
-                return ESP_OK;
-            }
 
+            // 1. 直接保存 WiFi 账密到 NVS
             this_->Save(ssid_str, password_str);
             cJSON_Delete(json);
-            // 设置成功响应
+
+            // 2. 先给手机发送成功响应 (确保 HTTP 响应完整送达手机网页)
             httpd_resp_set_type(req, "application/json");
             httpd_resp_set_hdr(req, "Connection", "close");
             httpd_resp_send(req, "{\"success\":true}", HTTPD_RESP_USE_STRLEN);
+
+            // 3. 延迟 200ms 后关闭 AP 热点并切换到纯 Station 模式去连接路由
+            xTaskCreate([](void* ctx) {
+                vTaskDelay(pdMS_TO_TICKS(200));
+                auto* self = static_cast<WifiConfigurationAp*>(ctx);
+                if (self->on_exit_requested_) {
+                    ESP_LOGI(TAG, "Form submitted: Closing AP and switching to Station mode");
+                    self->on_exit_requested_();
+                }
+                vTaskDelete(NULL);
+            }, "submit_exit_task", 4096, this_, 5, NULL);
+
             return ESP_OK;
         },
         .user_ctx = this
@@ -714,7 +722,7 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     strlcpy((char *)wifi_config.sta.ssid, ssid.c_str(), 32);
     strlcpy((char *)wifi_config.sta.password, password.c_str(), 64);
     wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
-    wifi_config.sta.failure_retry_cnt = 1;
+    wifi_config.sta.failure_retry_cnt = 3;
     
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     auto ret = esp_wifi_connect();
@@ -725,17 +733,13 @@ bool WifiConfigurationAp::ConnectToWifi(const std::string &ssid, const std::stri
     }
     ESP_LOGI(TAG, "Connecting to WiFi %s", ssid.c_str());
 
-    // Wait for the connection to complete for 10 or 25 seconds
+    // Wait for the connection to complete for 20 seconds (AP+STA mode needs extra time for channel scanning & DHCP)
     EventBits_t bits = xEventGroupWaitBits(
         event_group_,
         WIFI_GOT_IP_BIT | WIFI_FAIL_BIT,
         pdTRUE,
         pdFALSE,
-#ifdef CONFIG_SOC_WIFI_SUPPORT_5G
-        pdMS_TO_TICKS(25000)
-#else
-        pdMS_TO_TICKS(10000)
-#endif
+        pdMS_TO_TICKS(20000)
     );
     is_connecting_ = false;
 

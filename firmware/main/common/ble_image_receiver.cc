@@ -91,6 +91,21 @@ void ReceiveChunk(const uint8_t* data, uint16_t len) {
     }
 }
 
+void Deinit() {
+    if (!initialized) return;
+
+    if (image_buffer != nullptr) {
+        heap_caps_free(image_buffer);
+        image_buffer = nullptr;
+        ESP_LOGI(kTag, "Image buffer freed");
+    }
+
+    expected_size = 0;
+    received_size = 0;
+    status = kStatusIdle;
+    initialized = false;
+}
+
 void Reset() {
     expected_size = 0;
     received_size = 0;

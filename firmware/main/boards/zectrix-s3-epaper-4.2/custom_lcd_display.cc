@@ -484,7 +484,16 @@ void CustomLcdDisplay::refresh_task_loop() {
     };
 
     while (true) {
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
+        // When no dirty data is pending, block indefinitely to let CPU
+        // enter light sleep. Wake is triggered by xTaskNotifyGive() when
+        // new dirty data arrives via RequestUrgentRefresh/RequestUrgentFullRefresh.
+        bool has_pending_work = false;
+        if (dirty_mutex) {
+            xSemaphoreTake(dirty_mutex, portMAX_DELAY);
+            has_pending_work = pending || urgent_refresh || force_full_refresh_;
+            xSemaphoreGive(dirty_mutex);
+        }
+        ulTaskNotifyTake(pdTRUE, has_pending_work ? pdMS_TO_TICKS(50) : portMAX_DELAY);
 
         TickType_t now = xTaskGetTickCount();
 

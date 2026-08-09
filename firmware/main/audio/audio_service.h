@@ -93,6 +93,7 @@ public:
     const std::string& GetLastWakeWord() const;
     bool IsVoiceDetected() const { return voice_detected_; }
     bool IsIdle();
+    bool IsPlaybackIdle();
     bool IsWakeWordRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_WAKE_WORD_RUNNING; }
     bool IsAudioProcessorRunning() const { return xEventGroupGetBits(event_group_) & AS_EVENT_AUDIO_PROCESSOR_RUNNING; }
     bool IsAfeWakeWord();
@@ -152,6 +153,7 @@ private:
     bool service_stopped_ = true;
     bool audio_input_need_warmup_ = false;
     std::atomic<bool> mute_local_sound_{false};
+    std::atomic<bool> playback_active_{false};
     std::atomic<int64_t> ptt_start_ms_{0};
     std::atomic<bool> ptt_input_logged_{false};
 

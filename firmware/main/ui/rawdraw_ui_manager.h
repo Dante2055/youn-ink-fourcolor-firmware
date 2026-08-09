@@ -396,6 +396,11 @@ public:
     void VoiceWakeupTrigger(bool network_available);
 
     /**
+     * @brief Show that captured audio is being processed
+     */
+    void VoiceWakeupWaiting();
+
+    /**
      * @brief Signal voice recording completed
      */
     void VoiceWakeupDone();
@@ -468,8 +473,8 @@ private:
     std::atomic<bool> transient_refresh_pending_{false};
     std::atomic<bool> active_page_refresh_pending_{false};
     std::atomic<bool> gallery_slideshow_pending_{false};
-    std::atomic<bool> input_refresh_locked_{false};
     int last_clock_minute_key_ = -1;
+    int64_t last_clock_poll_us_ = 0;
     int gallery_slideshow_interval_minutes_ = 0;
 
     // Voice wakeup overlay state

@@ -116,7 +116,7 @@ private:
 
     // Volume dialog state
     bool showing_volume_dialog_ = false;
-    int volume_dialog_value_ = 70;
+    int volume_dialog_value_ = 100;
     std::function<void(int, bool)> volume_dialog_handler_;
 };
 

@@ -295,6 +295,12 @@ void DrawText(uint8_t* fb, int width, int x, int y, const char* text,
               const lv_font_t* font, Color color = BLACK,
               int height = 300);  ///< FB height for y-clipping
 
+void DrawTextScaled(uint8_t* fb, int width, int x, int y, const char* text,
+                    const lv_font_t* font, Color color = BLACK,
+                    int scale = 1, int height = 300);
+
+int MeasureTextScaledInkWidth(const char* text, const lv_font_t* font, int scale = 1, int* out_first_ofs_x = nullptr);
+
 /**
  * @brief Draw single icon from icon font
  *

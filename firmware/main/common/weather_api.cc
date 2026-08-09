@@ -263,9 +263,12 @@ static int s_response_len = 0;
 static esp_err_t HttpEventHandler(esp_http_client_event_t* evt) {
     switch (evt->event_id) {
         case HTTP_EVENT_ON_DATA:
-            if (s_response_len + evt->data_len < sizeof(s_response_buf)) {
+            if (s_response_len + evt->data_len < sizeof(s_response_buf) - 1) {
                 memcpy(s_response_buf + s_response_len, evt->data, evt->data_len);
                 s_response_len += evt->data_len;
+            } else {
+                ESP_LOGW(kTag, "HTTP response buffer overflow: %d + %d >= %d",
+                         s_response_len, evt->data_len, (int)sizeof(s_response_buf) - 1);
             }
             break;
         default:

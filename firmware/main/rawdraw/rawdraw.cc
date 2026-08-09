@@ -412,6 +412,102 @@ void DrawText(uint8_t* fb, int width, int x, int y, const char* text,
     }
 }
 
+void DrawTextScaled(uint8_t* fb, int width, int x, int y, const char* text,
+                    const lv_font_t* font, Color color, int scale, int height) {
+    if (!fb || !text || !font || scale <= 0) return;
+    SetFramebufferHeightHint(height);
+
+    int cursor_x = x;
+    int cursor_y = y;
+    const char* p = text;
+
+    while (*p) {
+        uint32_t ch = utf8_next(&p);
+        if (ch == 0) break;
+
+        if (ch == '\n') {
+            cursor_x = x;
+            cursor_y += font->line_height * scale;
+            continue;
+        }
+
+        lv_font_glyph_dsc_t g = {};
+        g.resolved_font = font;
+        if (!lv_font_get_glyph_dsc(font, &g, ch, 0)) {
+            cursor_x += (font->line_height / 2) * scale;
+            continue;
+        }
+
+        g.req_raw_bitmap = 1;
+        const uint8_t* bitmap = (const uint8_t*)lv_font_get_glyph_bitmap(&g, NULL);
+        g.req_raw_bitmap = 0;
+
+        if (!bitmap) {
+            cursor_x += g.adv_w * scale;
+            continue;
+        }
+
+        int gx = cursor_x + g.ofs_x * scale;
+        int gy = cursor_y;
+        int row_bits = (g.stride > 0) ? (int)(g.stride * 8) : (int)g.box_w;
+
+        for (int row = 0; row < (int)g.box_h; row++) {
+            for (int col = 0; col < (int)g.box_w; col++) {
+                int bit_idx = row * row_bits + col;
+                bool pixel = (bitmap[bit_idx >> 3] >> (7 - (bit_idx & 7))) & 1;
+
+                if (pixel) {
+                    for (int sy = 0; sy < scale; sy++) {
+                        for (int sx = 0; sx < scale; sx++) {
+                            int px = gx + col * scale + sx;
+                            int py = gy + row * scale + sy;
+                            set_pixel(fb, width, px, py, color);
+                        }
+                    }
+                }
+            }
+        }
+
+        cursor_x += g.adv_w * scale;
+    }
+}
+
+int MeasureTextScaledInkWidth(const char* text, const lv_font_t* font, int scale, int* out_first_ofs_x) {
+    if (!text || !font || scale <= 0) return 0;
+    int cursor_x = 0;
+    int min_x = 999999;
+    int max_x = -999999;
+    const char* p = text;
+
+    while (*p) {
+        uint32_t ch = utf8_next(&p);
+        if (ch == 0) break;
+
+        lv_font_glyph_dsc_t g = {};
+        g.resolved_font = font;
+        if (!lv_font_get_glyph_dsc(font, &g, ch, 0)) {
+            cursor_x += (font->line_height / 2) * scale;
+            continue;
+        }
+
+        if (g.box_w > 0) {
+            int gx_start = cursor_x + g.ofs_x * scale;
+            int gx_end = gx_start + g.box_w * scale;
+            if (gx_start < min_x) min_x = gx_start;
+            if (gx_end > max_x) max_x = gx_end;
+        }
+        cursor_x += g.adv_w * scale;
+    }
+
+    if (min_x > max_x) {
+        if (out_first_ofs_x) *out_first_ofs_x = 0;
+        return 0;
+    }
+
+    if (out_first_ofs_x) *out_first_ofs_x = min_x;
+    return (max_x - min_x);
+}
+
 void DrawIcon(uint8_t* fb, int width, int x, int y, const char* icon_code,
               const lv_font_t* font, Color color) {
     DrawText(fb, width, x, y, icon_code, font, color);

@@ -11,11 +11,14 @@
  */
 
 #include "chat_renderer.h"
+#include "audio_codec.h"
+#include "board.h"
 #include "rawdraw/components/footer_bar.h"
 #include "rawdraw/layout_utils.h"
 #include "rawdraw/rawdraw.h"
 #include "rawdraw/style.h"
 #include "rawdraw/theme.h"
+#include <esp_log.h>
 #include <algorithm>
 #include <cstdio>
 #include <vector>
@@ -140,6 +143,42 @@ constexpr int kChatContentY = Style::kStatusBarHeight + 10;
 // Input bar disabled (voice-only mode). Bottom reserve = frame border only.
 constexpr int kChatBottomReserve = 2;
 
+void DrawCuteRobot(uint8_t* fb, int width, int height) {
+    const int cx = width / 2;
+
+    DrawLine(fb, width, {cx, 75}, {cx, 60}, BLACK);
+    DrawLine(fb, width, {cx + 1, 75}, {cx + 1, 60}, BLACK);
+    DrawCircle(fb, width, {cx, 57}, 8, RED);
+    DrawCircleBorder(fb, width, {cx, 57}, 8, 2, BLACK);
+
+    DrawRoundRect(fb, width, height, {cx - 126, 105, 30, 68}, 12, YELLOW, BLACK, 3);
+    DrawRoundRect(fb, width, height, {cx + 96, 105, 30, 68}, 12, YELLOW, BLACK, 3);
+    DrawRoundRect(fb, width, height, {cx - 110, 74, 220, 134}, 38, YELLOW, BLACK, 4);
+    DrawRoundRect(fb, width, height, {cx - 89, 94, 178, 91}, 30, WHITE, BLACK, 4);
+
+    DrawCircle(fb, width, {cx - 43, 132}, 17, BLACK);
+    DrawCircle(fb, width, {cx + 43, 132}, 17, BLACK);
+    DrawCircle(fb, width, {cx - 48, 127}, 6, WHITE);
+    DrawCircle(fb, width, {cx + 38, 127}, 6, WHITE);
+    DrawCircle(fb, width, {cx - 71, 157}, 7, RED);
+    DrawCircle(fb, width, {cx + 71, 157}, 7, RED);
+    DrawLine(fb, width, {cx - 20, 158}, {cx, 169}, BLACK);
+    DrawLine(fb, width, {cx, 169}, {cx + 20, 158}, BLACK);
+    DrawLine(fb, width, {cx - 19, 159}, {cx, 170}, BLACK);
+    DrawLine(fb, width, {cx, 170}, {cx + 19, 159}, BLACK);
+
+    DrawCircle(fb, width, {cx - 88, 235}, 19, YELLOW);
+    DrawCircleBorder(fb, width, {cx - 88, 235}, 19, 3, BLACK);
+    DrawCircle(fb, width, {cx + 88, 235}, 19, YELLOW);
+    DrawCircleBorder(fb, width, {cx + 88, 235}, 19, 3, BLACK);
+    DrawRoundRect(fb, width, height, {cx - 70, 202, 140, 73}, 25, WHITE, BLACK, 4);
+    DrawRoundRect(fb, width, height, {cx - 44, 216, 88, 42}, 16, YELLOW, BLACK, 3);
+    DrawCircle(fb, width, {cx, 237}, 12, RED);
+    DrawCircle(fb, width, {cx, 237}, 4, WHITE);
+    DrawRoundRect(fb, width, height, {cx - 58, 266, 45, 22}, 10, RED, BLACK, 3);
+    DrawRoundRect(fb, width, height, {cx + 13, 266, 45, 22}, 10, YELLOW, BLACK, 3);
+}
+
 }  // namespace
 
 ChatRenderer::ChatRenderer()
@@ -152,7 +191,7 @@ ChatRenderer::ChatRenderer()
     , title_font_(&SourceHanSansSC_Medium_slim)
     , stream_frame_(0)
     , showing_volume_dialog_(false)
-    , volume_dialog_value_(70) {
+    , volume_dialog_value_(100) {
 }
 
 ChatRenderer::~ChatRenderer() {}
@@ -168,119 +207,8 @@ void ChatRenderer::Init(int width, int height) {
 
 void ChatRenderer::Render(uint8_t* fb, int width, int height) {
     if (!fb) return;
-    const auto& theme = ThemeManager::Get();
-    const PaintStyle bg_style = theme.Style(ThemeToken::BackgroundPrimary);
-    const PaintStyle card_style = theme.Component(ComponentRole::CardDefault);
-    const PaintStyle user_style = theme.Component(ComponentRole::TodoSelected);
-    const PaintStyle system_style = theme.Style(ThemeToken::TextSecondary);
-    const Color text = theme.ColorFor(ThemeToken::TextPrimary);
-
-    const int content_y = kChatContentY;
-    const int content_bottom = height - kChatBottomReserve;
-    const int content_height = std::max(40, content_bottom - content_y);
-
-    DrawStyledRect(fb, width, {0, Style::kStatusBarHeight, width, height - Style::kStatusBarHeight}, bg_style);
-
-    // Layout messages and compute positions
-    LayoutMessages();
-
-    // Render visible messages with scroll offset
-    for (const auto& entry : messages_) {
-        if (entry.text.empty()) {
-            continue;
-        }
-        const BubbleMetrics metrics = BuildBubbleMetrics(entry, font_, width);
-        Rect bubble = GetBubbleRect(entry, metrics, width);
-        bubble.y = entry.y_pos - scroll_offset_ + content_y;
-
-        if (bubble.y + bubble.h < content_y) continue;
-        if (bubble.y > content_bottom) continue;
-
-        const int visible_y = std::max(bubble.y, content_y);
-        const int visible_bottom = std::min(bubble.y + bubble.h, content_bottom);
-        const int visible_h = visible_bottom - visible_y;
-        if (visible_h <= 0) continue;
-
-        if (entry.role == ChatRole::System) {
-            // System hints are plain centered text
-            for (size_t line_index = 0; line_index < metrics.lines.size(); ++line_index) {
-                const auto& line = metrics.lines[line_index];
-                const int line_box_y = bubble.y + Style::kBubblePadding +
-                                       static_cast<int>(line_index) *
-                                           (metrics.line_box_h + metrics.line_gap);
-                if (line_box_y + metrics.line_box_h >= content_y && line_box_y <= content_bottom) {
-                    int text_w = MeasureTextWidth(line.c_str(), font_);
-                    int text_x = (width - text_w) / 2;
-                    DrawText(fb, width, text_x,
-                             InkCenteredTextTopYInBox(font_, line.c_str(), line_box_y, metrics.line_box_h, 0),
-                             line.c_str(), font_, system_style.fg);
-                }
-            }
-        } else if (entry.role == ChatRole::User) {
-            DrawStyledRoundRect(fb, width, height, {bubble.x, visible_y, bubble.w, visible_h},
-                                Style::kBubbleRadius, user_style);
-            for (size_t line_index = 0; line_index < metrics.lines.size(); ++line_index) {
-                const auto& line = metrics.lines[line_index];
-                const int line_box_y = bubble.y + Style::kBubblePadding +
-                                       static_cast<int>(line_index) *
-                                           (metrics.line_box_h + metrics.line_gap);
-                if (line_box_y + metrics.line_box_h >= content_y && line_box_y <= content_bottom) {
-                    DrawText(fb, width, bubble.x + Style::kBubblePadding,
-                             InkCenteredTextTopYInBox(font_, line.c_str(), line_box_y, metrics.line_box_h, 0),
-                             line.c_str(), font_, user_style.fg);
-                }
-            }
-        } else {
-            DrawStyledRoundRect(fb, width, height, {bubble.x, visible_y, bubble.w, visible_h},
-                                Style::kBubbleRadius, card_style);
-            for (size_t line_index = 0; line_index < metrics.lines.size(); ++line_index) {
-                const auto& line = metrics.lines[line_index];
-                const int line_box_y = bubble.y + Style::kBubblePadding +
-                                       static_cast<int>(line_index) *
-                                           (metrics.line_box_h + metrics.line_gap);
-                if (line_box_y + metrics.line_box_h >= content_y && line_box_y <= content_bottom) {
-                    DrawText(fb, width, bubble.x + Style::kBubblePadding,
-                             InkCenteredTextTopYInBox(font_, line.c_str(), line_box_y, metrics.line_box_h, 0),
-                             line.c_str(), font_, text);
-                }
-            }
-        }
-    }
-
-    DrawScrollIndicator(fb, width, content_y, content_height);
-
-#if 0
-    // Bottom input bar disabled — voice input only
-    Rect input_box{42, input_y, width - 42 - kChatSendW - kChatInputGap - 16, input_h};
-    DrawRoundRect(fb, width, input_box, Style::kBorderRadiusMD, WHITE, BLACK, 1);
-    const char* input_hint = nullptr;
-    if (is_listening_) {
-        input_hint = "正在录音并识别...";
-    } else if (is_streaming_) {
-        input_hint = "AI 正在回复";
-    } else if (!bottom_status_text_.empty()) {
-        input_hint = bottom_status_text_.c_str();
-    } else {
-        input_hint = "按住BOOT开始说话";
-    }
-    const std::string hint = FitTextToWidth(input_hint, font_, input_box.w - 24);
-    DrawText(fb, width, input_box.x + 12,
-             InkCenteredTextTopY(font_, hint.c_str(), input_box.y + input_box.h / 2, 0),
-             hint.c_str(), font_, BLACK);
-
-    Rect send_box{input_box.x + input_box.w + kChatInputGap, input_y, kChatSendW, input_h};
-    DrawRoundRect(fb, width, send_box, Style::kBorderRadiusMD, WHITE, BLACK, 1);
-    const char* action = is_streaming_ ? "回复中" : "发送";
-    const int action_w = MeasureTextWidth(action, font_);
-    DrawText(fb, width, send_box.x + (send_box.w - action_w) / 2,
-             InkCenteredTextTopY(font_, action, send_box.y + send_box.h / 2, 0),
-             action, font_, BLACK);
-#endif
-
-    // Render volume dialog overlay if showing
-    if (showing_volume_dialog_) {
-        RenderVolumeDialog(fb, width, height);
-    }
+    DrawRect(fb, width, {0, Style::kStatusBarHeight, width, height - Style::kStatusBarHeight}, WHITE);
+    DrawCuteRobot(fb, width, height);
 
     needs_full_refresh_ = false;
 }
@@ -394,79 +322,32 @@ void ChatRenderer::LayoutMessages() {
 }
 
 bool ChatRenderer::HandleInput(const ButtonEvent& event) {
-    // Volume dialog: intercept all input when dialog is showing
-    if (showing_volume_dialog_) {
-        switch (event.type) {
-            case ButtonEvent::kUpClick:
-                UpdateVolumeValue(10, false);
-                return true;
-            case ButtonEvent::kDownClick:
-                UpdateVolumeValue(-10, false);
-                return true;
-            case ButtonEvent::kUpLongPress:
-                volume_dialog_value_ = 100;
-                UpdateVolumeValue(0, false);
-                return true;
-            case ButtonEvent::kDownLongPress:
-                volume_dialog_value_ = 0;
-                UpdateVolumeValue(0, false);
-                return true;
-            case ButtonEvent::kBootClick:
-                UpdateVolumeValue(0, true);
-                return true;
-            default:
-                return true;  // Consume all input while volume dialog is open
-        }
-    }
-
     switch (event.type) {
-        case ButtonEvent::kUpClick:
-            if (scroll_offset_ > 0) {
-                scroll_offset_ -= Style::kSpacingXL * 2;
-                if (scroll_offset_ < 0) scroll_offset_ = 0;
-                follow_latest_ = (scroll_offset_ >= max_scroll_offset_);
-                needs_full_refresh_ = true;
-                return true;
+        case ButtonEvent::kUpClick: {
+            // Volume up
+            auto* codec = Board::GetInstance().GetAudioCodec();
+            if (codec) {
+                int vol = codec->output_volume();
+                vol = std::min(100, vol + 10);
+                codec->SetOutputVolume(vol);
+                ESP_LOGI("ChatRenderer", "Volume up: %d%%", vol);
             }
-            break;
-
-        case ButtonEvent::kDownClick:
-            if (scroll_offset_ < max_scroll_offset_) {
-                scroll_offset_ += Style::kSpacingXL * 2;
-                if (scroll_offset_ > max_scroll_offset_) {
-                    scroll_offset_ = max_scroll_offset_;
-                }
-                follow_latest_ = (scroll_offset_ >= max_scroll_offset_);
-                needs_full_refresh_ = true;
-                return true;
+            return true;
+        }
+        case ButtonEvent::kDownClick: {
+            // Volume down
+            auto* codec = Board::GetInstance().GetAudioCodec();
+            if (codec) {
+                int vol = codec->output_volume();
+                vol = std::max(0, vol - 10);
+                codec->SetOutputVolume(vol);
+                ESP_LOGI("ChatRenderer", "Volume down: %d%%", vol);
             }
-            break;
-
-        case ButtonEvent::kUpLongPress:
-            // Scroll to top
-            scroll_offset_ = 0;
-            follow_latest_ = false;
-            needs_full_refresh_ = true;
             return true;
-
-        case ButtonEvent::kDownLongPress:
-            // Scroll to bottom
-            scroll_offset_ = max_scroll_offset_;
-            follow_latest_ = true;
-            needs_full_refresh_ = true;
-            return true;
-
-        case ButtonEvent::kBootClick:
-            // Show volume dialog when BOOT is clicked during chat
-            // The handler will be set by lan_ui_handler to update actual volume
-            showing_volume_dialog_ = true;
-            needs_full_refresh_ = true;
-            return true;
-
+        }
         default:
-            break;
+            return false;
     }
-    return false;
 }
 
 void ChatRenderer::Clear() {

@@ -462,6 +462,13 @@ private:
             }
             FactoryTestService::Instance().HandleButton(FactoryTestButton::kConfirmLongPress);
         });
+
+        confirm_button_.OnPressUp([]() {
+            auto& app = Application::GetInstance();
+            if (app.GetRawDrawUiManager()) {
+                app.OnBootRelease();
+            }
+        });
     }
 
     void BindFactoryTestCallbacks() {

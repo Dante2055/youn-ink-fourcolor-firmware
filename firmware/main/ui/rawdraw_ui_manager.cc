@@ -27,11 +27,8 @@
 
 static const char* kTag = "RawDrawUiManager";
 static constexpr const char* kRawDrawThemeNvsKey = "rawdraw_theme";
-// Four-color e-paper cannot reliably partial-refresh the status bar in this
-// driver path; even a one-minute clock change becomes a full 400x300 refresh
-// and keeps the panel busy for 10s+. Keep the timer code in place, but leave
-// it disabled for now. To restore minute-by-minute clock updates later, flip
-// this to true after a safe status-bar-only refresh path exists.
+// The four-color panel may promote this status-bar update to a full refresh,
+// but the clock is expected to stay current.
 static constexpr bool kEnableMinuteClockRefresh = false;
 
 namespace ui {
@@ -81,17 +78,13 @@ int64_t MsUntilNextMinuteBoundary() {
     return static_cast<int64_t>(std::max(1, seconds_to_next)) * 1000;
 }
 
-bool IsNavigationClick(const rawdraw::ButtonEvent& event) {
-    return event.type == rawdraw::ButtonEvent::kUpClick ||
-           event.type == rawdraw::ButtonEvent::kDownClick ||
-           event.type == rawdraw::ButtonEvent::kBootClick;
-}
-
-void DrawBatteryIcon(uint8_t* fb, int width, int x, int y, int level, bool vertical) {
+void DrawBatteryIcon(uint8_t* fb, int width, int x, int y, int level, bool vertical,
+                     bool monochrome) {
     level = std::max(0, std::min(100, level));
-    const rawdraw::Color battery_color = level <= 15
-        ? rawdraw::ThemeManager::Get().Style(rawdraw::ThemeToken::Danger).border
-        : rawdraw::ThemeManager::Get().Style(rawdraw::ThemeToken::TextPrimary).fg;
+    const rawdraw::Color battery_color = monochrome ? rawdraw::BLACK :
+        (level <= 15
+            ? rawdraw::ThemeManager::Get().Style(rawdraw::ThemeToken::Danger).border
+            : rawdraw::ThemeManager::Get().Style(rawdraw::ThemeToken::TextPrimary).fg);
     if (vertical) {
         const int body_w = 9;
         const int body_h = 14;
@@ -121,10 +114,13 @@ void DrawBatteryIcon(uint8_t* fb, int width, int x, int y, int level, bool verti
     }
 }
 
-void DrawServerStatusMarker(uint8_t* fb, int width, int x, int center_y, bool server_connected, bool wifi_connected) {
+void DrawServerStatusMarker(uint8_t* fb, int width, int x, int center_y,
+                            bool server_connected, bool wifi_connected, bool monochrome) {
     if (!fb || width <= 0) return;
-    const rawdraw::Color success = rawdraw::ThemeManager::Get().Style(rawdraw::ThemeToken::SuccessLike).fg;
-    const rawdraw::Color warning = rawdraw::ThemeManager::Get().Style(rawdraw::ThemeToken::Warning).border;
+    const rawdraw::Color success = monochrome ? rawdraw::BLACK :
+        rawdraw::ThemeManager::Get().Style(rawdraw::ThemeToken::SuccessLike).fg;
+    const rawdraw::Color warning = monochrome ? rawdraw::BLACK :
+        rawdraw::ThemeManager::Get().Style(rawdraw::ThemeToken::Warning).border;
     if (server_connected) {
         // Draw the service-online marker as pixels instead of a font glyph.
         // This keeps the independent "*" visible on the 1bpp status bar even
@@ -363,10 +359,7 @@ void RawDrawUiManager::Init(CustomLcdDisplay* lcd, RefreshCallback refresh_cb) {
     width_ = lcd_->GetFBWidth();
     height_ = lcd_->GetFBHeight();
     refresh_cb_ = refresh_cb;
-    lcd_->SetOnRefreshIdle([this]() {
-        input_refresh_locked_.store(false, std::memory_order_release);
-        ESP_LOGI(kTag, "Display refresh idle; input unlocked");
-    });
+
 
     {
         Settings settings("display", false);
@@ -708,12 +701,6 @@ void RawDrawUiManager::StopLanHttpServer() {
 // ============================================================
 
 bool RawDrawUiManager::HandleInput(const rawdraw::ButtonEvent& event) {
-    const bool navigation_click = IsNavigationClick(event);
-    if (navigation_click && input_refresh_locked_.load(std::memory_order_acquire)) {
-        ESP_LOGI(kTag, "Navigation click ignored until current refresh completes: type=%d", event.type);
-        return true;
-    }
-
     if (event.type == rawdraw::ButtonEvent::kBootLongPress) {
         // AP transfer owns BOOT-long globally while the server is running, even
         // if a background display update temporarily moved the visible page.
@@ -829,9 +816,6 @@ bool RawDrawUiManager::HandleInput(const rawdraw::ButtonEvent& event) {
     bool handled = renderer->HandleInput(event);
 
     if (handled) {
-        if (navigation_click) {
-            input_refresh_locked_.store(true, std::memory_order_release);
-        }
         // Re-render the framebuffer with updated state
         auto* fb = lcd_ ? lcd_->GetFramebuffer() : nullptr;
         if (fb) {
@@ -924,7 +908,8 @@ void RawDrawUiManager::DrawGlobalPageFrame(uint8_t* fb, int width, int height) {
     if (!fb || width <= 4 || height <= 4) return;
     const auto border = rawdraw::ThemeManager::Get().Style(rawdraw::ThemeToken::Border);
     rawdraw::DrawRoundRectBorder(fb, width, height, {1, 1, width - 2, height - 2},
-                                 Style::kBorderRadiusMD, border.border_width, border.border);
+                                 Style::kBorderRadiusMD, border.border_width,
+                                 current_page_ == RawDrawPageId::Chat ? rawdraw::BLACK : border.border);
 }
 
 void RawDrawUiManager::DrawStatusBar(uint8_t* fb, int width, int height) {
@@ -934,11 +919,13 @@ void RawDrawUiManager::DrawStatusBar(uint8_t* fb, int width, int height) {
     int padding = Style::kStatusBarPadding;
     const lv_font_t* title_font = &SourceHanSansSC_Regular_slim;
     const auto& theme = ThemeManager::Get();
-    const PaintStyle bg_style = theme.Style(ThemeToken::BackgroundPrimary);
-    const PaintStyle text_style = theme.Style(ThemeToken::TextPrimary);
-    const PaintStyle accent_style = theme.Style(ThemeToken::Accent);
-    const PaintStyle border_style = theme.Style(ThemeToken::Border);
-    const PaintStyle danger_style = theme.Style(ThemeToken::Danger);
+    const bool monochrome = current_page_ == RawDrawPageId::Chat;
+    const PaintStyle monochrome_style = MakePaint(BLACK, WHITE, BLACK);
+    const PaintStyle bg_style = monochrome ? monochrome_style : theme.Style(ThemeToken::BackgroundPrimary);
+    const PaintStyle text_style = monochrome ? monochrome_style : theme.Style(ThemeToken::TextPrimary);
+    const PaintStyle accent_style = monochrome ? monochrome_style : theme.Style(ThemeToken::Accent);
+    const PaintStyle border_style = monochrome ? monochrome_style : theme.Style(ThemeToken::Border);
+    const PaintStyle danger_style = monochrome ? monochrome_style : theme.Style(ThemeToken::Danger);
 
     DrawStyledRect(fb, width, {0, 0, width, bar_height}, bg_style);
     DrawRect(fb, width, {1, bar_height - Style::kShellDividerThickness,
@@ -955,7 +942,8 @@ void RawDrawUiManager::DrawStatusBar(uint8_t* fb, int width, int height) {
         for (int i = 0; i < 4; ++i) {
             int bx = x + i * (sig_bar_w + sig_bar_gap);
             int by = center_y + 7 - sig_bar_heights[i];
-            DrawRect(fb, width, {bx, by, sig_bar_w, sig_bar_heights[i]}, theme.Style(ThemeToken::SuccessLike).fg);
+            DrawRect(fb, width, {bx, by, sig_bar_w, sig_bar_heights[i]},
+                     monochrome ? BLACK : theme.Style(ThemeToken::SuccessLike).fg);
         }
     } else {
         for (int i = 0; i < 4; ++i) {
@@ -972,7 +960,7 @@ void RawDrawUiManager::DrawStatusBar(uint8_t* fb, int width, int height) {
 
     const int marker_x = x + wifi_group_w + 10;
     DrawServerStatusMarker(fb, width, marker_x, center_y, status_bar_data_.server_connected,
-                           status_bar_data_.wifi_connected);
+                           status_bar_data_.wifi_connected, monochrome);
     int left_content_x = marker_x + 14;
     if (status_bar_data_.bluetooth_enabled) {
         const char* bt_icon = FA_SETTINGS_BLUETOOTH;
@@ -1009,11 +997,6 @@ void RawDrawUiManager::DrawStatusBar(uint8_t* fb, int width, int height) {
     }
     const int left_safe = date_x + date_w + 8;
 
-    const char* time_str = rawdraw::Clock::GetTimeString();
-    if (time_str == nullptr || time_str[0] == '\0') {
-        time_str = "--:--";
-    }
-
     const int battery_slot_w = 30;
     int right_x = width - padding;
     if (status_bar_data_.battery_level >= 0) {
@@ -1022,14 +1005,19 @@ void RawDrawUiManager::DrawStatusBar(uint8_t* fb, int width, int height) {
         const int battery_x = width - padding - battery_slot_w + (battery_slot_w - battery_w);
         const int battery_y = center_y - battery_h / 2;
         DrawBatteryIcon(fb, width, battery_x, battery_y, status_bar_data_.battery_level,
-                        status_bar_data_.battery_vertical);
+                        status_bar_data_.battery_vertical, monochrome);
         right_x = battery_x - 8;
     }
 
-    // Time on right side
-    const int clock_w = MiniTimeWidth(time_str);
-    DrawMiniTimeText(fb, width, right_x - clock_w, center_y - 5, time_str, accent_style.fg);
-    right_x = right_x - clock_w - 6;
+    if (!monochrome) {
+        const char* time_str = rawdraw::Clock::GetTimeString();
+        if (time_str == nullptr || time_str[0] == '\0') {
+            time_str = "--:--";
+        }
+        const int clock_w = MiniTimeWidth(time_str);
+        DrawMiniTimeText(fb, width, right_x - clock_w, center_y - 5, time_str, accent_style.fg);
+        right_x = right_x - clock_w - 6;
+    }
 
     const char* title = !status_bar_data_.central_text.empty()
         ? status_bar_data_.central_text.c_str()
@@ -1266,10 +1254,8 @@ void RawDrawUiManager::RefreshRect(const rawdraw::Rect& rect, bool urgent) {
         {rect.x - 4, rect.y - 4, rect.w + 12, rect.h + 12}, width_, height_));
     auto* mutex = lcd_->GetMutex();
     if (mutex) xSemaphoreTake(mutex, portMAX_DELAY);
-    if (mutex) {
-        xSemaphoreGive(mutex);
-        mutex = nullptr;
-    }
+    // Release mutex before calling callback (callback may re-acquire)
+    if (mutex) xSemaphoreGive(mutex);
     refresh_cb_(refresh_rect, urgent);
 }
 
@@ -1464,7 +1450,8 @@ void RawDrawUiManager::PumpClockRefresh() {
     if (slideshow_pending) {
         AdvanceGallerySlideshow();
     }
-    if (page_pending || transient_pending) {
+    const bool chat_page_frozen = current_page_ == RawDrawPageId::Chat;
+    if (!chat_page_frozen && (page_pending || transient_pending)) {
         RefreshActivePage(false);
     }
 
@@ -1473,15 +1460,26 @@ void RawDrawUiManager::PumpClockRefresh() {
         return;
     }
 
-    if (!clock_refresh_pending_.exchange(false, std::memory_order_acq_rel)) {
+    const bool timer_pending =
+        clock_refresh_pending_.exchange(false, std::memory_order_acq_rel);
+    const int64_t now_us = esp_timer_get_time();
+    if (!timer_pending && now_us - last_clock_poll_us_ < 1000000) {
         return;
     }
-
+    last_clock_poll_us_ = now_us;
     const int minute_key = CurrentLocalMinuteKey();
     if (minute_key == last_clock_minute_key_) {
+        if (timer_pending) {
+            ArmClockRefreshTimer();
+        }
+        return;
+    }
+    if (current_page_ == RawDrawPageId::Chat) {
+        last_clock_minute_key_ = minute_key;
         ArmClockRefreshTimer();
         return;
     }
+    ESP_LOGI(kTag, "Clock minute refresh: %d", minute_key);
 
     auto* fb = lcd_ ? lcd_->GetFramebuffer() : nullptr;
     if (fb != nullptr) {
@@ -1720,8 +1718,12 @@ bool RawDrawUiManager::IsLifeBarVisible() const {
 // ============================================================
 
 void RawDrawUiManager::VoiceWakeupTick() {
+    const bool was_visible = rawdraw::VoiceWakeupIsVisible(&voice_wakeup_state_);
     int64_t now = esp_timer_get_time();
     rawdraw::VoiceWakeupTick(&voice_wakeup_state_, now);
+    if (was_visible && !rawdraw::VoiceWakeupIsVisible(&voice_wakeup_state_)) {
+        RequestActivePageRefresh();
+    }
 }
 
 void RawDrawUiManager::VoiceWakeupTrigger(bool network_available) {
@@ -1743,6 +1745,11 @@ void RawDrawUiManager::VoiceWakeupTrigger(bool network_available) {
 
         TriggerRefresh(false);
     }
+}
+
+void RawDrawUiManager::VoiceWakeupWaiting() {
+    rawdraw::VoiceWakeupWaiting(&voice_wakeup_state_);
+    RequestActivePageRefresh();
 }
 
 void RawDrawUiManager::VoiceWakeupDone() {

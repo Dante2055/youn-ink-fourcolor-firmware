@@ -31,6 +31,11 @@ enum Status : uint8_t {
 bool Init();
 
 /**
+ * @brief Deinitialize receiver (free buffer)
+ */
+void Deinit();
+
+/**
  * @brief Start a new image transfer
  * @param total_size Expected total size in bytes
  */

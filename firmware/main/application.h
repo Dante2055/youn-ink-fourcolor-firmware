@@ -2,8 +2,10 @@
 #define _APPLICATION_H_
 
 #include <atomic>
+#include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string_view>
 
 #include "audio_service.h"
@@ -46,6 +48,8 @@ public:
     void OnWifiConfigComboLongPress();
     void OnBootClick();
     void OnBootLongPress();
+    void OnBootRelease();
+    void OnClockSynchronized();
 
 private:
     Application();
@@ -53,10 +57,24 @@ private:
 
     std::atomic<DeviceState> state_{kDeviceStateUnknown};
     std::atomic<bool> wifi_connected_{false};
+    std::atomic<bool> protocol_connected_{false};
+    std::atomic<bool> protocol_connecting_{false};
+    std::atomic<bool> conversation_active_{false};
+    std::atomic<bool> resume_listening_{false};
     AudioService audio_service_;
     std::unique_ptr<ui::RawDrawUiManager> rawdraw_ui_manager_;
+    std::unique_ptr<Protocol> protocol_;
     esp_timer_handle_t sleep_timer_ = nullptr;
+    std::mutex scheduled_mutex_;
+    std::deque<std::function<void()>> scheduled_callbacks_;
 
+    void InitializeDialogueProtocol(AudioCodec* codec);
+    void StartListening();
+    void StopListening();
+    void BeginListening();
+    void PrepareDialogueConnection();
+    void ConnectAndStartListening();
+    void HandleProtocolJson(const cJSON* root);
     void ArmSyncSleepTimer();
     void EnterScheduledSleep();
     void EnterManualSleep();
