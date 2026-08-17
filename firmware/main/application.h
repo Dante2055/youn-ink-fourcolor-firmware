@@ -47,6 +47,7 @@ public:
     void OnDownLongPress();
     void OnWifiConfigComboLongPress();
     void OnBootClick();
+    void OnBootDoubleClick();
     void OnBootLongPress();
     void OnBootRelease();
     void OnClockSynchronized();
@@ -61,10 +62,13 @@ private:
     std::atomic<bool> protocol_connecting_{false};
     std::atomic<bool> conversation_active_{false};
     std::atomic<bool> resume_listening_{false};
+    std::atomic<bool> silent_boot_refresh_{false};
+    std::atomic<bool> lan_user_disabled_{false};  ///< User manually closed LAN; don't auto-restart on WiFi reconnect
     AudioService audio_service_;
     std::unique_ptr<ui::RawDrawUiManager> rawdraw_ui_manager_;
     std::unique_ptr<Protocol> protocol_;
     esp_timer_handle_t sleep_timer_ = nullptr;
+    esp_timer_handle_t silent_boot_fallback_timer_ = nullptr;
     std::mutex scheduled_mutex_;
     std::deque<std::function<void()>> scheduled_callbacks_;
 

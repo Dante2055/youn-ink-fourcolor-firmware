@@ -343,7 +343,7 @@ void DrawStyledRect(uint8_t* fb, int width, const Rect& r, const PaintStyle& sty
     if (!fb || r.w <= 0 || r.h <= 0) return;
     const PaintStyle panel_style = NormalizeForPanel(style);
     if (panel_style.dither == DitherToken::None) {
-        DrawRect(fb, width, r, panel_style.bg);
+        FillRect(fb, width, r, panel_style.bg);
         return;
     }
     for (int y = r.y; y < r.y + r.h; ++y) {

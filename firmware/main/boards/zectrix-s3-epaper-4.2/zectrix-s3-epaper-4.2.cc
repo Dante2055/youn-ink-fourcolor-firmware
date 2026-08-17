@@ -453,6 +453,15 @@ private:
             FactoryTestService::Instance().HandleButton(FactoryTestButton::kConfirmClick);
         });
 
+        // CONFIRM (BOOT) double click → forward to application/active page
+        confirm_button_.OnDoubleClick([]() {
+            auto& app = Application::GetInstance();
+            if (app.GetRawDrawUiManager()) {
+                app.OnBootDoubleClick();
+                return;
+            }
+        });
+
         // CONFIRM (BOOT) long press → voice PTT or factory test
         confirm_button_.OnLongPress([]() {
             auto& app = Application::GetInstance();

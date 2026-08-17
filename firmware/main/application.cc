@@ -5,6 +5,7 @@
 #include "board.h"
 #include "common/photo_storage.h"
 #include "common/storage_manager.h"
+#include "common/weather_api.h"
 #include "display.h"
 #include "protocols/websocket_protocol.h"
 #include "settings.h"
@@ -32,10 +33,12 @@ constexpr char kSyncNamespace[] = "sync";
 constexpr char kSyncIntervalKey[] = "sync_interval";
 constexpr char kGalleryNamespace[] = "gallery";
 constexpr char kSlideshowIntervalKey[] = "slide_min";
-constexpr int kSettingsSlideshowIndex = 8;
-constexpr int kSettingsWifiIndex = 10;
-constexpr int kSettingsHttpServerIndex = 11;
-constexpr int kSettingsLanIpIndex = 12;
+// Indices into the settings item list built in Initialize(); keep in sync
+// with the push_back order there.
+constexpr int kSettingsSlideshowIndex = 4;
+constexpr int kSettingsWifiIndex = 6;
+constexpr int kSettingsHttpServerIndex = 7;
+constexpr int kSettingsLanIpIndex = 8;
 
 std::string FormatMinutesLabel(int minutes) {
     if (minutes <= 0) return "关闭";
@@ -156,9 +159,16 @@ Application::~Application() {
 
 void Application::Initialize() {
     auto& board = Board::GetInstance();
+    // BOOT-key wake from deep sleep starts a service-off session (quick
+    // interactive use). A real restart (settings "重启") has no deep-sleep
+    // wakeup cause, so the LAN service defaults back to on.
     const bool woke_by_boot_button =
         esp_reset_reason() == ESP_RST_DEEPSLEEP &&
         (esp_sleep_get_wakeup_causes() & BIT(ESP_SLEEP_WAKEUP_EXT0)) != 0;
+    if (woke_by_boot_button) {
+        lan_user_disabled_.store(true, std::memory_order_release);
+        ESP_LOGI(kTag, "BOOT wake: LAN service stays off until restart or manual enable");
+    }
     SetDeviceState(kDeviceStateStarting);
 
     AudioCodec* codec = board.GetAudioCodec();
@@ -192,11 +202,30 @@ void Application::Initialize() {
             lcd->RequestUrgentRefresh();
         }
     });
+    rawdraw_ui_manager_->SetLanServiceClosedCallback([this]() {
+        lan_user_disabled_.store(true, std::memory_order_release);
+        ESP_LOGI(kTag, "LAN service closed via web control; auto-start disabled until reboot");
+        Schedule([this]() {
+            if (auto* sr = rawdraw_ui_manager_->GetSettingsRenderer()) {
+                UpdateHttpServerSettingsItem(sr, false);
+            }
+            UpdateStatusBarForUi();
+        });
+    });
     rawdraw_ui_manager_->SetPageSwitchCallback([this](ui::RawDrawPageId page) {
-        const bool active = page == ui::RawDrawPageId::Chat;
-        if (conversation_active_.exchange(active, std::memory_order_acq_rel) == active) return;
-        resume_listening_.store(false, std::memory_order_release);
-        Schedule([this, active]() { active ? StartListening() : StopListening(); });
+        if (page != ui::RawDrawPageId::Chat) {
+            if (conversation_active_.exchange(false, std::memory_order_acq_rel)) {
+                resume_listening_.store(false, std::memory_order_release);
+                Schedule([this]() { StopListening(); });
+            }
+            ArmSyncSleepTimer();
+            return;
+        }
+        if (page == ui::RawDrawPageId::Chat) {
+            if (conversation_active_.exchange(true, std::memory_order_acq_rel)) return;
+            resume_listening_.store(false, std::memory_order_release);
+            Schedule([this]() { StartListening(); });
+        }
     });
 
     if (auto* sr = rawdraw_ui_manager_->GetSettingsRenderer()) {
@@ -213,40 +242,16 @@ void Application::Initialize() {
 
         std::vector<rawdraw::SettingsItemDef> items;
         items.push_back({"应用", "", nullptr, rawdraw::SettingsItemType::Section, false});
+        items.push_back({"待办事项", "打开", nullptr, rawdraw::SettingsItemType::Action, false,
+                         [this]() {
+                             if (rawdraw_ui_manager_) {
+                                 rawdraw_ui_manager_->SetCurrentPageWithoutRender(ui::RawDrawPageId::Todo);
+                             }
+                         }});
         items.push_back({"日历", "打开", nullptr, rawdraw::SettingsItemType::Action, false,
                          [this]() {
                              if (rawdraw_ui_manager_) {
                                  rawdraw_ui_manager_->SetCurrentPageWithoutRender(ui::RawDrawPageId::Calendar);
-                             }
-                         }});
-        items.push_back({"老黄历", "打开", nullptr, rawdraw::SettingsItemType::Action, false,
-                         [this]() {
-                             if (rawdraw_ui_manager_) {
-                                 rawdraw_ui_manager_->SetCurrentPageWithoutRender(ui::RawDrawPageId::Almanac);
-                             }
-                         }});
-        items.push_back({"电子书", "打开", nullptr, rawdraw::SettingsItemType::Action, false,
-                         [this]() {
-                             if (!rawdraw_ui_manager_) return;
-                             rawdraw_ui_manager_->GetEbookRenderer()->SetFileList(storage_manager::ListTxtFiles());
-                             rawdraw_ui_manager_->SetCurrentPageWithoutRender(ui::RawDrawPageId::Ebook);
-                         }});
-        items.push_back({"天气", "服务器下发", nullptr, rawdraw::SettingsItemType::Action, false,
-                         [this]() {
-                             if (rawdraw_ui_manager_) {
-                                 rawdraw_ui_manager_->SetCurrentPageWithoutRender(ui::RawDrawPageId::Weather);
-                             }
-                         }});
-        items.push_back({"天气详情", "打开", nullptr, rawdraw::SettingsItemType::Action, false,
-                         [this]() {
-                             if (rawdraw_ui_manager_) {
-                                 rawdraw_ui_manager_->SetCurrentPageWithoutRender(ui::RawDrawPageId::WeatherDetail);
-                             }
-                         }});
-        items.push_back({"新闻", "服务器下发", nullptr, rawdraw::SettingsItemType::Action, false,
-                         [this]() {
-                             if (rawdraw_ui_manager_) {
-                                 rawdraw_ui_manager_->SetCurrentPageWithoutRender(ui::RawDrawPageId::News);
                              }
                          }});
         items.push_back({"相册", "", nullptr, rawdraw::SettingsItemType::Section, false});
@@ -263,9 +268,7 @@ void Application::Initialize() {
                              if (next > 0 && sleep_timer_ != nullptr) {
                                  esp_timer_stop(sleep_timer_);
                                  ESP_LOGI(kTag, "Sync sleep timer paused while gallery slideshow is enabled");
-                             } else if (next <= 0 &&
-                                        (wifi_connected_.load(std::memory_order_acquire) ||
-                                         WifiManager::GetInstance().IsConnected())) {
+                             } else if (next <= 0) {
                                  ArmSyncSleepTimer();
                              }
                              sr->UpdateItem(kSettingsSlideshowIndex, FormatMinutesLabel(next));
@@ -274,12 +277,13 @@ void Application::Initialize() {
         items.push_back({"Wi-Fi", "未连接", nullptr, rawdraw::SettingsItemType::Checkbox, false,
                          [this, sr]() {
                              auto& wifi = WifiManager::GetInstance();
-                             if (wifi_connected_.load(std::memory_order_acquire) || wifi.IsConnected()) {
-                                 ESP_LOGI(kTag, "Wi-Fi setting toggled OFF");
-                                 if (rawdraw_ui_manager_ && rawdraw_ui_manager_->IsLanHttpServerRunning()) {
-                                     rawdraw_ui_manager_->StopLanHttpServer();
-                                     UpdateHttpServerSettingsItem(sr, false);
-                                 }
+                            if (wifi_connected_.load(std::memory_order_acquire) || wifi.IsConnected()) {
+                                ESP_LOGI(kTag, "Wi-Fi setting toggled OFF");
+                                lan_user_disabled_.store(true, std::memory_order_release);
+                                if (rawdraw_ui_manager_ && rawdraw_ui_manager_->IsLanHttpServerRunning()) {
+                                    rawdraw_ui_manager_->StopLanHttpServer();
+                                    UpdateHttpServerSettingsItem(sr, false);
+                                }
                                  wifi.StopStation();
                                  wifi_connected_.store(false, std::memory_order_release);
                                  UpdateWifiSettingsItem(sr, false);
@@ -296,13 +300,11 @@ void Application::Initialize() {
                              if (!rawdraw_ui_manager_) return;
                              if (rawdraw_ui_manager_->IsLanHttpServerRunning()) {
                                  ESP_LOGI(kTag, "LAN HTTP server toggled OFF");
+                                 lan_user_disabled_.store(true, std::memory_order_release);
                                  rawdraw_ui_manager_->StopLanHttpServer();
                                  UpdateHttpServerSettingsItem(sr, false);
                                  UpdateStatusBarForUi();
-                                 if (wifi_connected_.load(std::memory_order_acquire) ||
-                                     WifiManager::GetInstance().IsConnected()) {
-                                     ArmSyncSleepTimer();
-                                 }
+                                 ArmSyncSleepTimer();
                                  return;
                              }
 
@@ -320,6 +322,7 @@ void Application::Initialize() {
                                  UpdateStatusBarForUi();
                                  return;
                              }
+                             lan_user_disabled_.store(false, std::memory_order_release);
                              const bool started = rawdraw_ui_manager_->StartLanHttpServer(ip);
                              ESP_LOGI(kTag, "LAN HTTP server toggled ON: started=%d url=http://%s/",
                                       started ? 1 : 0, ip.c_str());
@@ -358,16 +361,33 @@ void Application::Initialize() {
     InitializeDialogueProtocol(codec);
 
     ESP_LOGI(kTag, "Rawdraw gallery UI initialized");
+    silent_boot_refresh_.store(true, std::memory_order_release);
+    if (silent_boot_fallback_timer_ == nullptr) {
+        esp_timer_create_args_t args = {};
+        args.callback = [](void* arg) {
+            auto* app = static_cast<Application*>(arg);
+            if (app->silent_boot_refresh_.exchange(false, std::memory_order_acq_rel)) {
+                ESP_LOGI("Application", "Silent boot timeout fallback: performing single final refresh");
+                app->UpdateStatusBarForUi();
+            }
+        };
+        args.arg = this;
+        args.dispatch_method = ESP_TIMER_TASK;
+        args.name = "boot_fallback";
+        esp_timer_create(&args, &silent_boot_fallback_timer_);
+    }
+    if (silent_boot_fallback_timer_ != nullptr) {
+        esp_timer_stop(silent_boot_fallback_timer_);
+        esp_timer_start_once(silent_boot_fallback_timer_, 6000000);  // 6s fallback
+    }
+
     if (esp_reset_reason() == ESP_RST_DEEPSLEEP) {
-        ESP_LOGI(kTag, "Wake from deep sleep: flash activity LED and refresh UI");
+        ESP_LOGI(kTag, "Wake from deep sleep: flash activity LED (silent network sync active)");
         board.FlashActivityLed();
-        if (rawdraw_ui_manager_) {
-            rawdraw_ui_manager_->RequestActivePageRefresh();
-        }
     }
 
     // Set up WiFi status callback to update StatusBar
-    board.SetNetworkEventCallback([this, woke_by_boot_button](NetworkEvent event, const std::string& data) {
+    board.SetNetworkEventCallback([this](NetworkEvent event, const std::string& data) {
         switch (event) {
             case NetworkEvent::Connected:
                 ESP_LOGI(kTag, "WiFi connected: %s", data.c_str());
@@ -376,8 +396,8 @@ void Application::Initialize() {
                 if (conversation_active_.load(std::memory_order_acquire)) {
                     Schedule([this]() { StartListening(); });
                 }
-                if (woke_by_boot_button) {
-                    ESP_LOGI(kTag, "LAN HTTP server auto-start skipped after BOOT wake");
+                if (lan_user_disabled_.load(std::memory_order_acquire)) {
+                    ESP_LOGI(kTag, "LAN HTTP server auto-start skipped: manually disabled by user");
                 } else if (rawdraw_ui_manager_ && !rawdraw_ui_manager_->IsLanHttpServerRunning()) {
                     const std::string ip = data.empty() ? WifiManager::GetInstance().GetIpAddress() : data;
                     if (!ip.empty()) {
@@ -406,6 +426,7 @@ void Application::Initialize() {
                     rawdraw_ui_manager_->StopLanHttpServer();
                 }
                 UpdateStatusBarForUi();
+                ArmSyncSleepTimer();
                 break;
             case NetworkEvent::Connecting:
             case NetworkEvent::Scanning:
@@ -537,14 +558,6 @@ void Application::OnBootClick() {
     }
     if (rawdraw_ui_manager_) {
         const auto page = rawdraw_ui_manager_->GetCurrentPage();
-        if (page == ui::RawDrawPageId::Weather) {
-            rawdraw_ui_manager_->SwitchPage(ui::RawDrawPageId::WeatherDetail);
-            return;
-        }
-        if (page == ui::RawDrawPageId::WeatherDetail) {
-            rawdraw_ui_manager_->SwitchPage(ui::RawDrawPageId::Weather);
-            return;
-        }
         if (page == ui::RawDrawPageId::Ebook) {
             auto* ebook = rawdraw_ui_manager_->GetEbookRenderer();
             if (ebook && !ebook->IsReaderMode()) {
@@ -559,6 +572,21 @@ void Application::OnBootClick() {
             }
         }
         rawdraw_ui_manager_->HandleInput(rawdraw::ButtonEvent{rawdraw::ButtonEvent::kBootClick});
+    }
+}
+
+void Application::OnBootDoubleClick() {
+    ESP_LOGI(kTag, "BOOT double click");
+    NoteButtonActivity();
+    if (rawdraw_ui_manager_) {
+        const auto current_page = rawdraw_ui_manager_->GetCurrentPage();
+        if (current_page == ui::RawDrawPageId::Chat) {
+            ESP_LOGI(kTag, "BOOT double click on Chat - triggering voice listening");
+            resume_listening_.store(false, std::memory_order_release);
+            Schedule([this]() { StartListening(); });
+            return;
+        }
+        rawdraw_ui_manager_->HandleInput(rawdraw::ButtonEvent{rawdraw::ButtonEvent::kBootDoubleClick});
     }
 }
 
@@ -583,6 +611,13 @@ void Application::OnBootRelease() {
 }
 
 void Application::OnClockSynchronized() {
+    if (silent_boot_fallback_timer_ != nullptr) {
+        esp_timer_stop(silent_boot_fallback_timer_);
+    }
+    const bool was_silent = silent_boot_refresh_.exchange(false, std::memory_order_acq_rel);
+    if (was_silent) {
+        ESP_LOGI(kTag, "Silent boot WiFi & SNTP clock sync complete: performing single final screen refresh");
+    }
     UpdateStatusBarForUi();
     if (conversation_active_.load(std::memory_order_acquire)) {
         Schedule([this]() { StartListening(); });
@@ -783,75 +818,10 @@ void Application::HandleProtocolJson(const cJSON* root) {
 
         const cJSON* forecast = cJSON_GetObjectItem(payload, "forecast");
         const int forecast_count = cJSON_IsArray(forecast) ? std::min(cJSON_GetArraySize(forecast), 7) : 0;
-        data.forecast.reserve(forecast_count);
-        for (int i = 0; i < forecast_count; ++i) {
-            const cJSON* item = cJSON_GetArrayItem(forecast, i);
-            if (!cJSON_IsObject(item)) continue;
-            data.forecast.push_back({JsonString(item, "label"), JsonString(item, "weather_text"),
-                                     JsonString(item, "icon_code"), JsonInt(item, "temp_min"),
-                                     JsonInt(item, "temp_max")});
-        }
-
-        std::vector<rawdraw::WeatherHourPoint> hourly;
-        const cJSON* hourly_json = cJSON_GetObjectItem(payload, "hourly");
-        const int hourly_count = cJSON_IsArray(hourly_json) ? std::min(cJSON_GetArraySize(hourly_json), 12) : 0;
-        hourly.reserve(hourly_count);
-        for (int i = 0; i < hourly_count; ++i) {
-            const cJSON* item = cJSON_GetArrayItem(hourly_json, i);
-            if (!cJSON_IsObject(item)) continue;
-            hourly.push_back({JsonString(item, "label"), JsonString(item, "icon_code"),
-                              JsonString(item, "weather_text"), JsonInt(item, "temp")});
-        }
-
-        if (data.city.empty() && data.temp.empty() && data.weather_text.empty() &&
-            data.forecast.empty() && hourly.empty()) {
-            ESP_LOGW(kTag, "Ignoring empty weather payload");
-            return;
-        }
-        static std::string last_signature;
-        if (!signature.empty() && signature == last_signature) return;
-        last_signature = signature;
-        Schedule([this, data = std::move(data), hourly = std::move(hourly)]() mutable {
-            if (!rawdraw_ui_manager_) return;
-            rawdraw_ui_manager_->GetWeatherRenderer()->Update(data);
-            auto* detail = rawdraw_ui_manager_->GetWeatherDetailRenderer();
-            detail->SetHourlyForecast(hourly);
-            detail->Update(data);
-            const auto page = rawdraw_ui_manager_->GetCurrentPage();
-            if (page == ui::RawDrawPageId::Weather || page == ui::RawDrawPageId::WeatherDetail) {
-                rawdraw_ui_manager_->RequestActivePageRefresh();
-            }
-        });
         return;
     }
 
     if (strcmp(message_type, "news") == 0) {
-        const std::string signature = JsonSignature(payload);
-        std::vector<rawdraw::NewsItem> items;
-        const cJSON* items_json = cJSON_GetObjectItem(payload, "items");
-        const int item_count = cJSON_IsArray(items_json) ? std::min(cJSON_GetArraySize(items_json), 20) : 0;
-        items.reserve(item_count);
-        for (int i = 0; i < item_count; ++i) {
-            const cJSON* item = cJSON_GetArrayItem(items_json, i);
-            if (!cJSON_IsObject(item)) continue;
-            rawdraw::NewsItem news{JsonString(item, "title"), JsonString(item, "summary"),
-                                   JsonString(item, "source"), JsonString(item, "time_label")};
-            if (!news.title.empty()) items.push_back(std::move(news));
-        }
-        if (items.empty()) {
-            ESP_LOGW(kTag, "Ignoring empty news payload");
-            return;
-        }
-        static std::string last_signature;
-        if (!signature.empty() && signature == last_signature) return;
-        last_signature = signature;
-        Schedule([this, items = std::move(items)]() mutable {
-            if (!rawdraw_ui_manager_) return;
-            rawdraw_ui_manager_->GetNewsRenderer()->SetItems(items);
-            if (rawdraw_ui_manager_->GetCurrentPage() == ui::RawDrawPageId::News) {
-                rawdraw_ui_manager_->RequestActivePageRefresh();
-            }
-        });
         return;
     }
 
@@ -879,6 +849,12 @@ void Application::HandleProtocolJson(const cJSON* root) {
 
 void Application::NoteButtonActivity() {
     Board::GetInstance().FlashActivityLed();
+    if (silent_boot_refresh_.exchange(false, std::memory_order_acq_rel)) {
+        if (silent_boot_fallback_timer_ != nullptr) {
+            esp_timer_stop(silent_boot_fallback_timer_);
+        }
+        ESP_LOGI(kTag, "Button pressed during silent boot: cancelling silent boot mode");
+    }
 }
 
 void Application::EnterWifiConfigMode() {
@@ -898,13 +874,6 @@ void Application::EnterWifiConfigMode() {
 }
 
 void Application::ArmSyncSleepTimer() {
-    if (IsLocalHttpServiceRunning(rawdraw_ui_manager_.get())) {
-        if (sleep_timer_ != nullptr) {
-            esp_timer_stop(sleep_timer_);
-        }
-        ESP_LOGI(kTag, "Sync sleep timer skipped while local HTTP transfer service is running");
-        return;
-    }
     if (rawdraw_ui_manager_ &&
         rawdraw_ui_manager_->GetGallerySlideshowIntervalMinutes() > 0) {
         if (sleep_timer_ != nullptr) {
@@ -944,9 +913,11 @@ void Application::EnterScheduledSleep() {
         return;
     }
     if (IsLocalHttpServiceRunning(rawdraw_ui_manager_.get())) {
-        ESP_LOGI(kTag, "Scheduled sleep skipped: local HTTP transfer service is running");
-        ArmSyncSleepTimer();
-        return;
+        ESP_LOGI(kTag, "Scheduled sleep: stopping local HTTP transfer service");
+        rawdraw_ui_manager_->StopLanHttpServer();
+        if (rawdraw_ui_manager_->IsHttpServerRunning()) {
+            rawdraw_ui_manager_->StopApTransferMode();
+        }
     }
     if (rawdraw_ui_manager_ &&
         rawdraw_ui_manager_->GetGallerySlideshowIntervalMinutes() > 0) {
@@ -959,6 +930,7 @@ void Application::EnterScheduledSleep() {
     wifi_connected_.store(false, std::memory_order_release);
     esp_wifi_disconnect();
     esp_wifi_stop();
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
     esp_sleep_enable_ext0_wakeup(static_cast<gpio_num_t>(BOOT_BUTTON_GPIO), 0);
     esp_deep_sleep_start();
 }
@@ -976,6 +948,7 @@ void Application::EnterManualSleep() {
     esp_wifi_stop();
     UpdateStatusBarForUi();
     vTaskDelay(pdMS_TO_TICKS(300));
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
     esp_sleep_enable_ext0_wakeup(static_cast<gpio_num_t>(BOOT_BUTTON_GPIO), 0);
     esp_deep_sleep_start();
 }
@@ -999,7 +972,7 @@ void Application::Run() {
         }
         if (rawdraw_ui_manager_) {
             rawdraw_ui_manager_->VoiceWakeupTick();
-            rawdraw_ui_manager_->PumpClockRefresh();
+            rawdraw_ui_manager_->PumpPendingRefreshes();
         }
         // Use longer delay when idle to give tickless idle / light sleep
         // more opportunity. 20ms when there's pending work, 100ms when idle.
@@ -1067,6 +1040,10 @@ void Application::UpdateStatusBarForUi() {
                                      rawdraw_ui_manager_->IsLanHttpServerRunning()
                                          ? lan_ip
                                          : "");
+        if (silent_boot_refresh_.load(std::memory_order_acquire)) {
+            ESP_LOGD(kTag, "Silent boot active: status bar updated in memory, skipping EPD refresh");
+            return;
+        }
         rawdraw_ui_manager_->RequestActivePageRefresh();
     }
     return;

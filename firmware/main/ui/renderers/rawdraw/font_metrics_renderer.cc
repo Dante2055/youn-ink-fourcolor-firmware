@@ -39,7 +39,7 @@ void FontMetricsRenderer::Init(int width, int height) {
 
 void FontMetricsRenderer::Render(uint8_t* fb, int width, int height) {
     if (!fb) return;
-    DrawRect(fb, width, {0, Style::kStatusBarHeight, width, height - Style::kStatusBarHeight}, WHITE);
+    FillRect(fb, width, {0, Style::kStatusBarHeight, width, height - Style::kStatusBarHeight}, WHITE);
 
     const int x = 10;
     int y = Style::kStatusBarHeight + 10;

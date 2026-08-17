@@ -154,14 +154,17 @@ void DeferredControlTask(void* arg) {
     vTaskDelay(pdMS_TO_TICKS(300));
     if (request->server) {
         request->server->Stop();
+        request->server->NotifyUserClosedService();
     }
     if (request->stop_wifi || request->enter_sleep) {
         ESP_LOGI(kTag, "Stopping WiFi after web control request");
-        esp_wifi_disconnect();
-        esp_wifi_stop();
+        // Go through WifiManager so the station's reconnect machinery
+        // (event handlers + rescan timer) is torn down and WiFi stays off.
+        WifiManager::GetInstance().StopStation();
     }
     if (request->enter_sleep) {
         ESP_LOGI(kTag, "Entering deep sleep after web control request");
+        esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
         esp_sleep_enable_ext0_wakeup(static_cast<gpio_num_t>(BOOT_BUTTON_GPIO), 0);
         esp_deep_sleep_start();
     }
@@ -940,6 +943,16 @@ void ApTransferServer::SetPhotosChangedCallback(std::function<void()> callback) 
 
 void ApTransferServer::SetShowPhotoCallback(std::function<bool(const std::string&)> callback) {
     show_photo_callback_ = std::move(callback);
+}
+
+void ApTransferServer::SetServiceClosedCallback(std::function<void()> callback) {
+    service_closed_callback_ = std::move(callback);
+}
+
+void ApTransferServer::NotifyUserClosedService() {
+    if (service_closed_callback_) {
+        service_closed_callback_();
+    }
 }
 
 }  // namespace rawdraw

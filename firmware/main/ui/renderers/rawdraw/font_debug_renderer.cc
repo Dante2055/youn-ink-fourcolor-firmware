@@ -72,7 +72,7 @@ void FontDebugRenderer::Init(int width, int height) {
 
 void FontDebugRenderer::Render(uint8_t* fb, int width, int height) {
     if (!fb) return;
-    DrawRect(fb, width, {0, Style::kStatusBarHeight, width, height - Style::kStatusBarHeight}, WHITE);
+    FillRect(fb, width, {0, Style::kStatusBarHeight, width, height - Style::kStatusBarHeight}, WHITE);
 
     const int x = 10;
     const int w = Style::kScreenWidth - 20;

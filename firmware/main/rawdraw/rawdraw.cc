@@ -108,10 +108,16 @@ Color get_pixel(const uint8_t* fb, int width, int x, int y) {
 void DrawRect(uint8_t* fb, int width, const Rect& r, Color color) {
     if (!fb || r.w <= 0 || r.h <= 0) return;
 
-    // Optimize horizontal fills: set multiple pixels at once
-    for (int y = r.y; y < r.y + r.h; y++) {
-        for (int x = r.x; x < r.x + r.w; x++) {
-            set_pixel(fb, width, x, y, color);
+    // Top and bottom horizontal lines
+    DrawHLine(fb, width, r.y, r.x, r.x + r.w - 1, color);
+    if (r.h > 1) {
+        DrawHLine(fb, width, r.y + r.h - 1, r.x, r.x + r.w - 1, color);
+    }
+    // Left and right vertical lines
+    if (r.h > 2) {
+        DrawVLine(fb, width, r.x, r.y + 1, r.y + r.h - 2, color);
+        if (r.w > 1) {
+            DrawVLine(fb, width, r.x + r.w - 1, r.y + 1, r.y + r.h - 2, color);
         }
     }
 }
@@ -647,7 +653,13 @@ Rect MeasureTextBounds(const char* text, const lv_font_t* font, int max_width) {
 // ============================================================
 
 void FillRect(uint8_t* fb, int width, const Rect& r, Color color) {
-    DrawRect(fb, width, r, color);
+    if (!fb || r.w <= 0 || r.h <= 0) return;
+
+    for (int y = r.y; y < r.y + r.h; y++) {
+        for (int x = r.x; x < r.x + r.w; x++) {
+            set_pixel(fb, width, x, y, color);
+        }
+    }
 }
 
 void InvertRegion(uint8_t* fb, int width, const Rect& r) {

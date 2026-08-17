@@ -116,7 +116,7 @@ void ApTransferRenderer::RenderInstructions(uint8_t* fb, int width, int height) 
     const int bar_gap = 4;
     const int heights[] = {8, 16, 24, 32};
     for (int i = 0; i < 4; i++) {
-        DrawRect(fb, width, {bar_x + i * (bar_w + bar_gap), bar_y - heights[i], bar_w, heights[i]}, accent);
+        FillRect(fb, width, {bar_x + i * (bar_w + bar_gap), bar_y - heights[i], bar_w, heights[i]}, accent);
     }
 
     // Instructions text
@@ -225,8 +225,7 @@ void ApTransferRenderer::RenderStatus(uint8_t* fb, int width, int height) {
         const int bar_y = center_y + 50;
         
         DrawRectBorder(fb, width, {bar_x, bar_y, bar_w, bar_h}, 1, border);
-        // Animated portion would be added later
-        DrawRect(fb, width, {bar_x + 2, bar_y + 2, bar_w / 4, bar_h - 4}, accent);
+        FillRect(fb, width, {bar_x + 2, bar_y + 2, bar_w / 4, bar_h - 4}, accent);
     }
 
     const std::string ip = LooksLikeIpv4(status_message_) ? status_message_ : kDefaultApIp;

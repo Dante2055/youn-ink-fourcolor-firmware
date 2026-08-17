@@ -183,7 +183,7 @@ void NewsRenderer::RenderItem(uint8_t* fb, int width, int y, int index, bool sel
     snprintf(index_buf, sizeof(index_buf), "%d", index + 1);
     DrawText(fb, width, row.x + 8, text_y, index_buf, font_, selected ? selected_style.border : secondary);
     if (selected) {
-        DrawRect(fb, width, {row.x + 4, center_y - 7, 3, 14}, selected_style.border);
+        FillRect(fb, width, {row.x + 4, center_y - 7, 3, 14}, selected_style.border);
     }
     const int index_w = MeasureTextWidth(index_buf, font_);
     const int title_x = row.x + index_w + 12;

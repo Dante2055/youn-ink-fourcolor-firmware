@@ -63,6 +63,12 @@ public:
     void SetSettingsChangedCallback(std::function<void(int slideshow_interval_minutes)> callback);
     void SetPhotosChangedCallback(std::function<void()> callback);
     void SetShowPhotoCallback(std::function<bool(const std::string& photo_id)> callback);
+    // Fired when the user closes the service (and/or WiFi) from the web page,
+    // so the app can suppress auto-start until reboot.
+    void SetServiceClosedCallback(std::function<void()> callback);
+    // Invoke service_closed_callback_ once the server has actually stopped
+    // (called by the deferred web-control task).
+    void NotifyUserClosedService();
 
 private:
     enum class TransferMode {
@@ -84,6 +90,7 @@ private:
     std::function<void(int slideshow_interval_minutes)> settings_changed_callback_;
     std::function<void()> photos_changed_callback_;
     std::function<bool(const std::string& photo_id)> show_photo_callback_;
+    std::function<void()> service_closed_callback_;
 
     bool StartAccessPoint();
     const std::string& GetApIp() const { return ap_ip_; }

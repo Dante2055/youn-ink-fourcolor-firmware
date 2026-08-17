@@ -112,7 +112,7 @@ void ListItem::Draw(uint8_t* fb, int width, int height) {
     if (default_colors) {
         DrawStyledRect(fb, width, bounds, row_style);
     } else {
-        DrawRect(fb, width, bounds, bg);
+        FillRect(fb, width, bounds, bg);
     }
 
     // Calculate layout positions

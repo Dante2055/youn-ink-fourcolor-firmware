@@ -571,7 +571,7 @@ void SettingsRenderer::Render(uint8_t* fb, int width, int height) {
             const int thumb_h = std::max(10, track_h * visible_count / total);
             const int max_start = std::max(1, total - visible_count);
             const int thumb_y = track_y + (track_h - thumb_h) * window_start / max_start;
-            DrawRect(fb, width, {track_x - 2, thumb_y, 4, thumb_h}, selected_style.border);
+            FillRect(fb, width, {track_x - 2, thumb_y, 4, thumb_h}, selected_style.border);
         }
     }
     const int64_t now = esp_timer_get_time();
@@ -667,7 +667,7 @@ void SettingsRenderer::RenderItem(uint8_t* fb, int width, int y,
     if (selected) {
         // 1bpp fallback turns selected surfaces into light paper, so keep the
         // compact focus rail as solid ink for a clear cursor.
-        DrawRect(fb, width, {content_left - 8, row_center_y - 8, 3, 16}, selected_style.border);
+        FillRect(fb, width, {content_left - 8, row_center_y - 8, 3, 16}, selected_style.border);
     }
 
     DrawSettingsVectorIcon(fb, width, item.label, icon_x, row_center_y, fg_color);
@@ -1320,7 +1320,7 @@ void SettingsRenderer::RenderStorageDialog(uint8_t* fb, int width, int height) {
     DrawRectBorder(fb, width, {bar_x, bar_y, bar_w, bar_h}, 1, progress_style.border);
     int fill_w = (bar_w - 2) * fill_pct / 100;
     if (fill_w > 0) {
-        DrawRect(fb, width, {bar_x + 1, bar_y + 1, fill_w, bar_h - 2}, progress_fill);
+        FillRect(fb, width, {bar_x + 1, bar_y + 1, fill_w, bar_h - 2}, progress_fill);
     }
 
     // Info rows
@@ -1404,7 +1404,7 @@ void SettingsRenderer::RenderVolumeDialog(uint8_t* fb, int width, int height) {
     DrawRectBorder(fb, width, {track_x, track_y, track_w, track_h}, 1, progress_style.border);
     int fill_w = (track_w - 4) * volume_dialog_value_ / 100;
     if (fill_w > 0) {
-        DrawRect(fb, width, {track_x + 2, track_y + 2, fill_w, track_h - 4}, progress_fill);
+        FillRect(fb, width, {track_x + 2, track_y + 2, fill_w, track_h - 4}, progress_fill);
     }
 
     for (int i = 0; i <= 4; ++i) {
@@ -1621,7 +1621,7 @@ void SettingsRenderer::RenderServerListDialog(uint8_t* fb, int width, int height
             // Scroll thumb
             const int thumb_h = scroll_bar_h * kServerListVisibleRows / total;
             const int thumb_y = scroll_bar_y + (scroll_start * scroll_bar_h / total);
-            DrawRect(fb, width, {scroll_bar_x - 2, thumb_y, 4, thumb_h}, accent);
+            FillRect(fb, width, {scroll_bar_x - 2, thumb_y, 4, thumb_h}, accent);
         }
     }
 
@@ -1798,7 +1798,7 @@ void SettingsRenderer::RenderOtaDialog(uint8_t* fb, int width, int height) {
         DrawRectBorder(fb, width, {bar_x, bar_y, bar_w, bar_h}, 1, progress_style.border);
         const int fill_w = (bar_w - 4) * ota_progress_percent_ / 100;
         if (fill_w > 0) {
-            DrawRect(fb, width, {bar_x + 2, bar_y + 2, fill_w, bar_h - 4}, progress_fill);
+            FillRect(fb, width, {bar_x + 2, bar_y + 2, fill_w, bar_h - 4}, progress_fill);
         }
         char pct_buf[16];
         snprintf(pct_buf, sizeof(pct_buf), "%d%%", ota_progress_percent_);

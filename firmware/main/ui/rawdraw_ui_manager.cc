@@ -23,13 +23,9 @@
 #include <cstring>
 #include <cstdio>
 #include <string>
-#include <ctime>
 
 static const char* kTag = "RawDrawUiManager";
 static constexpr const char* kRawDrawThemeNvsKey = "rawdraw_theme";
-// The four-color panel may promote this status-bar update to a full refresh,
-// but the clock is expected to stay current.
-static constexpr bool kEnableMinuteClockRefresh = false;
 
 namespace ui {
 
@@ -62,22 +58,6 @@ std::string FitTextToWidth(const std::string& text, const lv_font_t* font, int m
     return fitted;
 }
 
-int CurrentLocalMinuteKey() {
-    time_t now = time(nullptr);
-    struct tm tm_buf;
-    localtime_r(&now, &tm_buf);
-    return tm_buf.tm_year * 366 * 24 * 60 + tm_buf.tm_yday * 24 * 60 +
-           tm_buf.tm_hour * 60 + tm_buf.tm_min;
-}
-
-int64_t MsUntilNextMinuteBoundary() {
-    time_t now = time(nullptr);
-    struct tm tm_buf;
-    localtime_r(&now, &tm_buf);
-    const int seconds_to_next = 60 - tm_buf.tm_sec;
-    return static_cast<int64_t>(std::max(1, seconds_to_next)) * 1000;
-}
-
 void DrawBatteryIcon(uint8_t* fb, int width, int x, int y, int level, bool vertical,
                      bool monochrome) {
     level = std::max(0, std::min(100, level));
@@ -89,27 +69,27 @@ void DrawBatteryIcon(uint8_t* fb, int width, int x, int y, int level, bool verti
         const int body_w = 9;
         const int body_h = 14;
         rawdraw::DrawRectBorder(fb, width, {x, y + 2, body_w, body_h}, 1, battery_color);
-        rawdraw::DrawRect(fb, width, {x + 3, y, 3, 2}, battery_color);
+        rawdraw::FillRect(fb, width, {x + 3, y, 3, 2}, battery_color);
         const int seg_h = 3;
         const int gap = 1;
         const int filled = level >= 90 ? 3 : (level >= 50 ? 2 : (level > 10 ? 1 : 0));
         for (int i = 0; i < 3; ++i) {
             if (i >= 3 - filled) {
                 const int sy = y + 3 + i * (seg_h + gap);
-                rawdraw::DrawRect(fb, width, {x + 2, sy, body_w - 4, seg_h}, battery_color);
+                rawdraw::FillRect(fb, width, {x + 2, sy, body_w - 4, seg_h}, battery_color);
             }
         }
     } else {
         const int body_w = 24;
         const int body_h = 12;
         rawdraw::DrawRectBorder(fb, width, {x, y, body_w, body_h}, 1, battery_color);
-        rawdraw::DrawRect(fb, width, {x + body_w, y + 3, 2, 6}, battery_color);
+        rawdraw::FillRect(fb, width, {x + body_w, y + 3, 2, 6}, battery_color);
         const int seg_w = 6;
         const int gap = 1;
         const int filled = level >= 90 ? 3 : (level >= 50 ? 2 : (level > 10 ? 1 : 0));
         for (int i = 0; i < filled; ++i) {
             const int sx = x + 2 + i * (seg_w + gap);
-            rawdraw::DrawRect(fb, width, {sx, y + 2, seg_w, body_h - 4}, battery_color);
+            rawdraw::FillRect(fb, width, {sx, y + 2, seg_w, body_h - 4}, battery_color);
         }
     }
 }
@@ -193,16 +173,12 @@ void DrawMiniTimeText(uint8_t* fb, int width, int x, int y, const char* text, ra
 const char* RawDrawUiManager::GetPageTitle(RawDrawPageId page) {
     switch (page) {
         case RawDrawPageId::Chat:     return "对话";
+        case RawDrawPageId::Todo:     return "待办事项";
         case RawDrawPageId::Ebook:    return "电子书";
         case RawDrawPageId::Wifi:     return "WiFi状态";
         case RawDrawPageId::Settings: return "设置";
         case RawDrawPageId::Gallery:  return "相册";
-        case RawDrawPageId::Weather:  return "天气";
-        case RawDrawPageId::News:     return "热点";
-        case RawDrawPageId::WeatherDetail: return "天气详情";
         case RawDrawPageId::PhotoDetail: return "照片详情";
-        case RawDrawPageId::LifeBar:  return "人生进度";
-        case RawDrawPageId::Almanac:  return "老黄历";
         case RawDrawPageId::Log:      return "日志";
         case RawDrawPageId::YearProgress: return "年度进度";
         case RawDrawPageId::Calendar:   return "日历";
@@ -229,16 +205,12 @@ RawDrawUiManager::RawDrawUiManager()
     // Create renderers
     clock_.SetColor(rawdraw::ThemeManager::Get().Style(rawdraw::ThemeToken::Accent).fg);
     chat_renderer_ = std::make_unique<rawdraw::ChatRenderer>();
+    todo_renderer_ = std::make_unique<rawdraw::TodoRenderer>();
     ebook_renderer_ = std::make_unique<rawdraw::EbookRenderer>();
     wifi_renderer_ = std::make_unique<rawdraw::WifiRenderer>();
     settings_renderer_ = std::make_unique<rawdraw::SettingsRenderer>();
     photo_gallery_renderer_ = std::make_unique<rawdraw::PhotoGalleryRenderer>();
     photo_detail_renderer_ = std::make_unique<rawdraw::PhotoDetailRenderer>();
-    weather_renderer_ = std::make_unique<rawdraw::WeatherRenderer>();
-    weather_detail_renderer_ = std::make_unique<rawdraw::WeatherDetailRenderer>();
-    news_renderer_ = std::make_unique<rawdraw::NewsRenderer>();
-    lifebar_renderer_ = std::make_unique<rawdraw::LifeBarRenderer>();
-    almanac_renderer_ = std::make_unique<rawdraw::AlmanacRenderer>();
     log_renderer_ = std::make_unique<rawdraw::LogRenderer>();
     yearprogress_renderer_ = std::make_unique<rawdraw::YearProgressRenderer>();
     calendar_renderer_ = std::make_unique<rawdraw::CalendarRenderer>();
@@ -301,7 +273,8 @@ RawDrawUiManager::RawDrawUiManager()
     });
     ap_transfer_server_->SetSettingsChangedCallback([this](int slideshow_interval_minutes) {
         SetGallerySlideshowIntervalMinutes(slideshow_interval_minutes);
-        UpdateSettingsItem(3, slideshow_interval_minutes <= 0
+        // Index 4 = 轮播间隔 in the settings list built by Application::Initialize()
+        UpdateSettingsItem(4, slideshow_interval_minutes <= 0
             ? std::string("关闭")
             : std::to_string(slideshow_interval_minutes) + "min");
         RequestActivePageRefresh();
@@ -327,11 +300,6 @@ RawDrawUiManager::RawDrawUiManager()
 }
 
 RawDrawUiManager::~RawDrawUiManager() {
-    if (clock_refresh_timer_ != nullptr) {
-        esp_timer_stop(clock_refresh_timer_);
-        esp_timer_delete(clock_refresh_timer_);
-        clock_refresh_timer_ = nullptr;
-    }
     if (transient_refresh_timer_ != nullptr) {
         esp_timer_stop(transient_refresh_timer_);
         esp_timer_delete(transient_refresh_timer_);
@@ -373,20 +341,6 @@ void RawDrawUiManager::Init(CustomLcdDisplay* lcd, RefreshCallback refresh_cb) {
 
     // Initialize voice wakeup overlay
     rawdraw::VoiceWakeupInit(&voice_wakeup_state_, &SourceHanSansSC_Regular_slim);
-    last_clock_minute_key_ = CurrentLocalMinuteKey();
-
-    if (kEnableMinuteClockRefresh && clock_refresh_timer_ == nullptr) {
-        esp_timer_create_args_t timer_args = {};
-        timer_args.callback = &RawDrawUiManager::OnClockRefreshTimer;
-        timer_args.arg = this;
-        timer_args.dispatch_method = ESP_TIMER_TASK;
-        timer_args.name = "rawdraw_clock";
-        esp_err_t ret = esp_timer_create(&timer_args, &clock_refresh_timer_);
-        if (ret != ESP_OK) {
-            ESP_LOGW(kTag, "Failed to create clock refresh timer: %s", esp_err_to_name(ret));
-        }
-    }
-    ArmClockRefreshTimer();
 
     if (transient_refresh_timer_ == nullptr) {
         esp_timer_create_args_t timer_args = {};
@@ -531,16 +485,12 @@ void RawDrawUiManager::SetCurrentPageWithoutRender(RawDrawPageId page) {
 rawdraw::PageRenderer* RawDrawUiManager::GetRendererForPage(RawDrawPageId page) const {
     switch (page) {
         case RawDrawPageId::Chat:     return chat_renderer_.get();
+        case RawDrawPageId::Todo:     return todo_renderer_.get();
         case RawDrawPageId::Ebook:    return ebook_renderer_.get();
         case RawDrawPageId::Wifi:     return wifi_renderer_.get();
         case RawDrawPageId::Settings: return settings_renderer_.get();
         case RawDrawPageId::Gallery:  return photo_gallery_renderer_.get();
-        case RawDrawPageId::Weather:  return weather_renderer_.get();
-        case RawDrawPageId::News:     return news_renderer_.get();
-        case RawDrawPageId::WeatherDetail: return weather_detail_renderer_.get();
         case RawDrawPageId::PhotoDetail: return photo_detail_renderer_.get();
-        case RawDrawPageId::LifeBar:  return lifebar_renderer_.get();
-        case RawDrawPageId::Almanac:  return almanac_renderer_.get();
         case RawDrawPageId::Log:      return log_renderer_.get();
         case RawDrawPageId::YearProgress: return yearprogress_renderer_.get();
         case RawDrawPageId::Calendar:   return calendar_renderer_.get();
@@ -637,8 +587,9 @@ bool RawDrawUiManager::TryDisplayCurrentPhotoRaw4Color() {
     return shown;
 }
 
-const std::array<RawDrawUiManager::QuickSwitchItem, 2>& RawDrawUiManager::GetQuickSwitchItems() {
-    static const std::array<QuickSwitchItem, 2> kItems = {{
+const std::array<RawDrawUiManager::QuickSwitchItem, 3>& RawDrawUiManager::GetQuickSwitchItems() {
+    static const std::array<QuickSwitchItem, 3> kItems = {{
+        {RawDrawPageId::Todo, "待办", nullptr},
         {RawDrawPageId::Gallery, "相册", FA_SETTINGS_IMAGE},
         {RawDrawPageId::Settings, "设置", FA_SETTINGS_GEAR},
 #if 0
@@ -693,6 +644,12 @@ bool RawDrawUiManager::StartLanHttpServer(const std::string& ip_address) {
 void RawDrawUiManager::StopLanHttpServer() {
     if (ap_transfer_server_ && ap_transfer_server_->IsLanMode()) {
         ap_transfer_server_->Stop();
+    }
+}
+
+void RawDrawUiManager::SetLanServiceClosedCallback(std::function<void()> callback) {
+    if (ap_transfer_server_) {
+        ap_transfer_server_->SetServiceClosedCallback(std::move(callback));
     }
 }
 
@@ -894,8 +851,8 @@ void RawDrawUiManager::RenderAll(uint8_t* fb, int width, int height) {
         DrawGlobalPageFrame(fb, width, height);
     }
 
-    // Draw voice wakeup overlay if active
-    if (rawdraw::VoiceWakeupIsVisible(&voice_wakeup_state_)) {
+    // Draw voice wakeup overlay if active (suppressed on Todo page to keep list contents 100% visible)
+    if (rawdraw::VoiceWakeupIsVisible(&voice_wakeup_state_) && current_page_ != RawDrawPageId::Todo) {
         rawdraw::VoiceWakeupDraw(fb, width, height, &voice_wakeup_state_);
     }
 
@@ -942,7 +899,7 @@ void RawDrawUiManager::DrawStatusBar(uint8_t* fb, int width, int height) {
         for (int i = 0; i < 4; ++i) {
             int bx = x + i * (sig_bar_w + sig_bar_gap);
             int by = center_y + 7 - sig_bar_heights[i];
-            DrawRect(fb, width, {bx, by, sig_bar_w, sig_bar_heights[i]},
+            FillRect(fb, width, {bx, by, sig_bar_w, sig_bar_heights[i]},
                      monochrome ? BLACK : theme.Style(ThemeToken::SuccessLike).fg);
         }
     } else {
@@ -1163,7 +1120,7 @@ void RawDrawUiManager::DrawQuickSwitchOverlay(uint8_t* fb, int width, int height
         if (selected) {
             rawdraw::DrawStyledRoundRect(fb, width, height, {row_x, y, row_w, item_h},
                                          Style::kBorderRadiusMD, row_style);
-            rawdraw::DrawRect(fb, width, {row_x + 5, y + 6, 3, item_h - 12}, row_style.border);
+            rawdraw::FillRect(fb, width, {row_x + 5, y + 6, 3, item_h - 12}, row_style.border);
         } else {
             rawdraw::DrawStyledRoundRect(fb, width, height, {row_x, y, row_w, item_h},
                                          Style::kBorderRadiusMD, row_style);
@@ -1210,7 +1167,7 @@ void RawDrawUiManager::DrawQuickSwitchOverlay(uint8_t* fb, int width, int height
         const int thumb_h = std::max(8, sb_track_h * kVisibleCount / total);
         const int max_scroll = std::max(1, total - kVisibleCount);
         const int thumb_y = sb_top + (sb_track_h - thumb_h) * quick_switch_first_visible_ / max_scroll;
-        rawdraw::DrawRect(fb, width, {sb_x, thumb_y, sb_w, thumb_h}, selected_style.border);
+        rawdraw::FillRect(fb, width, {sb_x, thumb_y, sb_w, thumb_h}, selected_style.border);
     }
 
     rawdraw::DrawHLine(fb, width, overlay_y + overlay_h - 24, overlay_x + 14, overlay_x + overlay_w - 14, border_style.border);
@@ -1401,24 +1358,6 @@ void RawDrawUiManager::UpdateStatusBar(const RawDrawStatusBarData& data) {
     }
 }
 
-void RawDrawUiManager::ArmClockRefreshTimer() {
-    if (!kEnableMinuteClockRefresh) {
-        if (clock_refresh_timer_ != nullptr) {
-            esp_timer_stop(clock_refresh_timer_);
-        }
-        return;
-    }
-    if (clock_refresh_timer_ == nullptr) {
-        return;
-    }
-    esp_timer_stop(clock_refresh_timer_);
-    const int64_t delay_ms = MsUntilNextMinuteBoundary();
-    esp_err_t ret = esp_timer_start_once(clock_refresh_timer_, delay_ms * 1000);
-    if (ret != ESP_OK) {
-        ESP_LOGW(kTag, "Failed to arm clock refresh timer: %s", esp_err_to_name(ret));
-    }
-}
-
 void RawDrawUiManager::ArmTransientRefreshTimer(int delay_ms) {
     if (transient_refresh_timer_ == nullptr) return;
     esp_timer_stop(transient_refresh_timer_);
@@ -1429,13 +1368,6 @@ void RawDrawUiManager::ArmTransientRefreshTimer(int delay_ms) {
     }
 }
 
-void RawDrawUiManager::OnClockRefreshTimer(void* arg) {
-    auto* self = static_cast<RawDrawUiManager*>(arg);
-    if (self != nullptr) {
-        self->clock_refresh_pending_.store(true, std::memory_order_release);
-    }
-}
-
 void RawDrawUiManager::OnTransientRefreshTimer(void* arg) {
     auto* self = static_cast<RawDrawUiManager*>(arg);
     if (self != nullptr) {
@@ -1443,7 +1375,7 @@ void RawDrawUiManager::OnTransientRefreshTimer(void* arg) {
     }
 }
 
-void RawDrawUiManager::PumpClockRefresh() {
+void RawDrawUiManager::PumpPendingRefreshes() {
     const bool page_pending = active_page_refresh_pending_.exchange(false, std::memory_order_acq_rel);
     const bool transient_pending = transient_refresh_pending_.exchange(false, std::memory_order_acq_rel);
     const bool slideshow_pending = gallery_slideshow_pending_.exchange(false, std::memory_order_acq_rel);
@@ -1454,48 +1386,6 @@ void RawDrawUiManager::PumpClockRefresh() {
     if (!chat_page_frozen && (page_pending || transient_pending)) {
         RefreshActivePage(false);
     }
-
-    if (!kEnableMinuteClockRefresh) {
-        clock_refresh_pending_.store(false, std::memory_order_release);
-        return;
-    }
-
-    const bool timer_pending =
-        clock_refresh_pending_.exchange(false, std::memory_order_acq_rel);
-    const int64_t now_us = esp_timer_get_time();
-    if (!timer_pending && now_us - last_clock_poll_us_ < 1000000) {
-        return;
-    }
-    last_clock_poll_us_ = now_us;
-    const int minute_key = CurrentLocalMinuteKey();
-    if (minute_key == last_clock_minute_key_) {
-        if (timer_pending) {
-            ArmClockRefreshTimer();
-        }
-        return;
-    }
-    if (current_page_ == RawDrawPageId::Chat) {
-        last_clock_minute_key_ = minute_key;
-        ArmClockRefreshTimer();
-        return;
-    }
-    ESP_LOGI(kTag, "Clock minute refresh: %d", minute_key);
-
-    auto* fb = lcd_ ? lcd_->GetFramebuffer() : nullptr;
-    if (fb != nullptr) {
-        auto* mutex = lcd_->GetMutex();
-        if (mutex) xSemaphoreTake(mutex, portMAX_DELAY);
-        // Do NOT Clear() the whole buffer — redraw directly over existing pixels.
-        // Only the status bar (clock) region changes each minute, so analyze_frame_diff
-        // will see a small diff_ratio and trigger partial refresh (EPD_DisplayPart)
-        // instead of a full refresh (EPD_Display) that causes visible flashing.
-        RenderAll(fb, width_, height_);
-        if (mutex) xSemaphoreGive(mutex);
-        TriggerRefresh(false);
-    }
-
-    last_clock_minute_key_ = minute_key;
-    ArmClockRefreshTimer();
 }
 
 // ============================================================
@@ -1687,30 +1577,14 @@ void RawDrawUiManager::SetWifiBlinking(bool blinking) {
 // ============================================================
 
 void RawDrawUiManager::SetLifeBarVisible(bool visible) {
-    if (lifebar_renderer_) {
-        lifebar_renderer_->SetVisible(visible);
-        lifebar_renderer_->MarkFullRefresh();
-
-        // If currently on the LifeBar page, re-render
-        if (current_page_ == RawDrawPageId::LifeBar) {
-            auto* fb = lcd_ ? lcd_->GetFramebuffer() : nullptr;
-            if (fb) {
-                auto* mutex = lcd_->GetMutex();
-                if (mutex) xSemaphoreTake(mutex, portMAX_DELAY);
-                rawdraw::Clear(fb, width_, height_);
-                RenderAll(fb, width_, height_);
-                if (mutex) xSemaphoreGive(mutex);
-                TriggerRefresh(false);
-            }
-        }
+    lifebar_visible_ = visible;
+    if (yearprogress_renderer_) {
+        yearprogress_renderer_->MarkFullRefresh();
     }
 }
 
 bool RawDrawUiManager::IsLifeBarVisible() const {
-    if (lifebar_renderer_) {
-        return lifebar_renderer_->IsVisible();
-    }
-    return true;
+    return lifebar_visible_;
 }
 
 // ============================================================

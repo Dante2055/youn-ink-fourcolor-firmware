@@ -82,7 +82,7 @@ void ScrollView::DrawScrollbar(uint8_t* fb, int width) {
     DrawStyledRect(fb, width, {sb_x, bounds_.y, scrollbar_width_, bounds_.h}, track);
 
     // Draw scrollbar indicator (dark)
-    DrawRect(fb, width, {sb_x, sb_y, scrollbar_width_, sb_height}, thumb);
+    FillRect(fb, width, {sb_x, sb_y, scrollbar_width_, sb_height}, thumb);
 }
 
 void ScrollView::Draw(uint8_t* fb, int width, ContentDrawCallback draw_cb) {

@@ -138,7 +138,7 @@ void LayerManager::CompositeLayer(uint8_t* fb, int fb_width, LayerType type) {
     // For foreground/overlay: just XOR on top
     if (type == LAYER_BACKGROUND) {
         // Clear region to white
-        DrawRect(fb, fb_width, r, WHITE);
+        FillRect(fb, fb_width, r, WHITE);
     }
 
     // XOR-merge layer buffer into framebuffer

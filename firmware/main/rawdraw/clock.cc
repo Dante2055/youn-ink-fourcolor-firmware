@@ -116,7 +116,7 @@ bool Clock::DrawWithClear(uint8_t* fb, int width, int height, Color bg_color) {
 
     // Clear the clock region first
     Rect r = { x_, y_, kClockW, kClockH };
-    DrawRect(fb, width, r, bg_color);
+    FillRect(fb, width, r, bg_color);
 
     return Draw(fb, width, height);
 }

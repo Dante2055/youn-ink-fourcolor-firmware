@@ -633,6 +633,7 @@ void CustomLcdDisplay::refresh_task_loop() {
         }
         if (!should_full && partial_since_full >= 10) {
             should_full = true;
+            ESP_LOGI(TAG, "[STRATEGY] partial_since_full>=10 -> FULL (clearing ghosting)");
         }
 
         stat_refresh++;

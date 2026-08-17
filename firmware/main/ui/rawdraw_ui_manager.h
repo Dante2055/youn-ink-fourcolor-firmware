@@ -14,16 +14,12 @@
 
 #include "ui/renderers/rawdraw/page_renderer.h"
 #include "ui/renderers/rawdraw/chat_renderer.h"
+#include "ui/renderers/rawdraw/todo_renderer.h"
 #include "ui/renderers/rawdraw/settings_renderer.h"
 #include "ui/renderers/rawdraw/ebook_renderer.h"
 #include "ui/renderers/rawdraw/wifi_renderer.h"
 #include "ui/renderers/rawdraw/photo_gallery.h"
 #include "ui/renderers/rawdraw/photo_detail_renderer.h"
-#include "ui/renderers/rawdraw/weather_renderer.h"
-#include "ui/renderers/rawdraw/weather_detail_renderer.h"
-#include "ui/renderers/rawdraw/news_renderer.h"
-#include "ui/renderers/rawdraw/lifebar_renderer.h"
-#include "ui/renderers/rawdraw/almanac_renderer.h"
 #include "ui/renderers/rawdraw/log_renderer.h"
 #include "ui/renderers/rawdraw/yearprogress_renderer.h"
 #include "ui/renderers/rawdraw/font_debug_renderer.h"
@@ -60,16 +56,12 @@ namespace ui {
  */
 enum class RawDrawPageId {
     Chat = 0,
+    Todo = 1,
     Ebook = 2,
     Wifi = 3,
     Settings = 4,
     Gallery = 5,
-    Weather = 6,
-    News = 7,
-    WeatherDetail = 8,
     PhotoDetail = 9,
-    LifeBar = 10,
-    Almanac = 11,
     Log = 12,
     YearProgress = 13,
     Calendar = 14,
@@ -202,6 +194,7 @@ public:
                             const std::string& url);
     bool StartLanHttpServer(const std::string& ip_address);
     void StopLanHttpServer();
+    void SetLanServiceClosedCallback(std::function<void()> callback);
 
     /**
      * @brief Render everything to the framebuffer
@@ -323,16 +316,12 @@ public:
     // ============================================================
 
     rawdraw::ChatRenderer* GetChatRenderer() { return chat_renderer_.get(); }
+    rawdraw::TodoRenderer* GetTodoRenderer() { return todo_renderer_.get(); }
     rawdraw::EbookRenderer* GetEbookRenderer() { return ebook_renderer_.get(); }
     rawdraw::WifiRenderer* GetWifiRenderer() { return wifi_renderer_.get(); }
     rawdraw::SettingsRenderer* GetSettingsRenderer() { return settings_renderer_.get(); }
     rawdraw::PhotoGalleryRenderer* GetPhotoGalleryRenderer() { return photo_gallery_renderer_.get(); }
     rawdraw::PhotoDetailRenderer* GetPhotoDetailRenderer() { return photo_detail_renderer_.get(); }
-    rawdraw::WeatherRenderer* GetWeatherRenderer() { return weather_renderer_.get(); }
-    rawdraw::WeatherDetailRenderer* GetWeatherDetailRenderer() { return weather_detail_renderer_.get(); }
-    rawdraw::NewsRenderer* GetNewsRenderer() { return news_renderer_.get(); }
-    rawdraw::LifeBarRenderer* GetLifeBarRenderer() { return lifebar_renderer_.get(); }
-    rawdraw::AlmanacRenderer* GetAlmanacRenderer() { return almanac_renderer_.get(); }
     rawdraw::LogRenderer* GetLogRenderer() { return log_renderer_.get(); }
     rawdraw::YearProgressRenderer* GetYearProgressRenderer() { return yearprogress_renderer_.get(); }
     rawdraw::CalendarRenderer* GetCalendarRenderer() { return calendar_renderer_.get(); }
@@ -410,13 +399,8 @@ public:
      */
     bool VoiceWakeupIsActive() const;
 
-    /**
-     * @brief Process pending minute-clock refresh requests from esp_timer
-     *
-     * The esp_timer callback only marks a pending flag. Actual framebuffer
-     * rendering and EPD refresh happen here on the main/UI loop thread.
-     */
-    void PumpClockRefresh();
+    /** @brief Process pending UI refresh and slideshow requests on the main loop. */
+    void PumpPendingRefreshes();
 
 private:
     struct QuickSwitchItem {
@@ -439,16 +423,12 @@ private:
 
     // Page renderers (owned)
     std::unique_ptr<rawdraw::ChatRenderer> chat_renderer_;
+    std::unique_ptr<rawdraw::TodoRenderer> todo_renderer_;
     std::unique_ptr<rawdraw::EbookRenderer> ebook_renderer_;
     std::unique_ptr<rawdraw::WifiRenderer> wifi_renderer_;
     std::unique_ptr<rawdraw::SettingsRenderer> settings_renderer_;
     std::unique_ptr<rawdraw::PhotoGalleryRenderer> photo_gallery_renderer_;
     std::unique_ptr<rawdraw::PhotoDetailRenderer> photo_detail_renderer_;
-    std::unique_ptr<rawdraw::WeatherRenderer> weather_renderer_;
-    std::unique_ptr<rawdraw::WeatherDetailRenderer> weather_detail_renderer_;
-    std::unique_ptr<rawdraw::NewsRenderer> news_renderer_;
-    std::unique_ptr<rawdraw::LifeBarRenderer> lifebar_renderer_;
-    std::unique_ptr<rawdraw::AlmanacRenderer> almanac_renderer_;
     std::unique_ptr<rawdraw::LogRenderer> log_renderer_;
     std::unique_ptr<rawdraw::YearProgressRenderer> yearprogress_renderer_;
     std::unique_ptr<rawdraw::CalendarRenderer> calendar_renderer_;
@@ -456,6 +436,7 @@ private:
     std::unique_ptr<rawdraw::FontMetricsRenderer> font_metrics_renderer_;
     std::unique_ptr<rawdraw::ApTransferRenderer> ap_transfer_renderer_;
     std::unique_ptr<rawdraw::ApTransferServer> ap_transfer_server_;
+    bool lifebar_visible_{true};
 
     // Refresh callback (provided by CustomLcdDisplay)
     RefreshCallback refresh_cb_;
@@ -466,15 +447,11 @@ private:
 
     // Clock component (persistent, drawn on every RenderAll)
     rawdraw::Clock clock_;
-    esp_timer_handle_t clock_refresh_timer_ = nullptr;
     esp_timer_handle_t transient_refresh_timer_ = nullptr;
     esp_timer_handle_t gallery_slideshow_timer_ = nullptr;
-    std::atomic<bool> clock_refresh_pending_{false};
     std::atomic<bool> transient_refresh_pending_{false};
     std::atomic<bool> active_page_refresh_pending_{false};
     std::atomic<bool> gallery_slideshow_pending_{false};
-    int last_clock_minute_key_ = -1;
-    int64_t last_clock_poll_us_ = 0;
     int gallery_slideshow_interval_minutes_ = 0;
 
     // Voice wakeup overlay state
@@ -492,9 +469,7 @@ private:
     void RefreshActivePage(bool urgent = false);
     void RefreshActivePageRect(const rawdraw::Rect& rect, bool urgent = false);
     void DrawStatusBar(uint8_t* fb, int width, int height);
-    void ArmClockRefreshTimer();
     void ArmTransientRefreshTimer(int delay_ms = 2000);
-    static void OnClockRefreshTimer(void* arg);
     static void OnTransientRefreshTimer(void* arg);
     static void OnGallerySlideshowTimer(void* arg);
     void ArmGallerySlideshowTimer();
@@ -507,7 +482,7 @@ private:
     void RestoreQuickSwitchBacking(uint8_t* fb);
     void RedrawQuickSwitchOnly(uint8_t* fb);
     void RefreshRect(const rawdraw::Rect& rect, bool urgent = false);
-    static const std::array<QuickSwitchItem, 2>& GetQuickSwitchItems();
+    static const std::array<QuickSwitchItem, 3>& GetQuickSwitchItems();
     void MarkAllRenderersFullRefresh();
 };
 

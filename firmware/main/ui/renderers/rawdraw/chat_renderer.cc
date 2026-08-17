@@ -207,7 +207,7 @@ void ChatRenderer::Init(int width, int height) {
 
 void ChatRenderer::Render(uint8_t* fb, int width, int height) {
     if (!fb) return;
-    DrawRect(fb, width, {0, Style::kStatusBarHeight, width, height - Style::kStatusBarHeight}, WHITE);
+    FillRect(fb, width, {0, Style::kStatusBarHeight, width, height - Style::kStatusBarHeight}, WHITE);
     DrawCuteRobot(fb, width, height);
 
     needs_full_refresh_ = false;
@@ -514,7 +514,7 @@ void ChatRenderer::RenderVolumeDialog(uint8_t* fb, int width, int height) {
     // Fill bar
     int fill_w = (track_w - 4) * volume_dialog_value_ / 100;
     if (fill_w > 0) {
-        DrawRect(fb, width, {track_x + 2, track_y + 2, fill_w, track_h - 4}, progress_style.fg);
+        FillRect(fb, width, {track_x + 2, track_y + 2, fill_w, track_h - 4}, progress_style.fg);
     }
 
     // Tick marks

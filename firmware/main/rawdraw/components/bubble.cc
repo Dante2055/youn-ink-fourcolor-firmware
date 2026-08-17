@@ -246,14 +246,14 @@ void Bubble::Draw(uint8_t* fb, int width, int height) {
         if (radius_ > 0) {
             DrawRoundRect(fb, width, bounds, radius_, fill_color_, border_color_, 0);
         } else {
-            DrawRect(fb, width, bounds, fill_color_);
+            FillRect(fb, width, bounds, fill_color_);
         }
     } else if (border_width_ > 0) {
         // AI/System 消息有边框：画主题表面 + 边框
         if (radius_ > 0) {
             DrawRoundRect(fb, width, bounds, radius_, fill_color_, border_color_, border_width_);
         } else {
-            DrawRect(fb, width, bounds, fill_color_);
+            FillRect(fb, width, bounds, fill_color_);
             DrawRectBorder(fb, width, bounds, border_width_, border_color_);
         }
     } else {
